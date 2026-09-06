@@ -305,8 +305,31 @@ const bundle = inspect('reading the shipped web bundle', () => {
   if (b.missing) {
     throw new Error(`webBundle.root "${wantedRoot}" does not exist inside the shipped .app (is it "public"?)`);
   }
-  if (wantedRoot && b.files.length === 0) {
-    throw new Error(`webBundle.root "${wantedRoot}" contains no readable text files -- every bundle rule would pass vacuously`);
+  // Zero scanned files is fatal whenever ANY rule reads the bundle, whether or
+  // not a root was named.
+  //
+  // The first version of this guard read `if (wantedRoot && files.length === 0)`,
+  // which meant a manifest with capabilityCoupling and no webBundle.root fell
+  // through: the scan rooted at the .app itself, found no text (a real bundle's
+  // top level is compiled binaries), and every coupling rule then reported "no
+  // shipped-bundle path matches" and the run printed CLEAN. Verifying nothing
+  // and finding nothing print the same way, which is the exact failure this
+  // whole tool exists to prevent -- and I introduced it while writing the guard
+  // against it. Condition the check on what the rules NEED, never on what the
+  // manifest happened to say.
+  const readsBundle = Boolean(
+    wantedRoot ||
+    expect.renderedVersion ||
+    (expect.capabilityCoupling || []).length ||
+    ((expect.webBundle && expect.webBundle.mustContain) || []).length ||
+    ((expect.webBundle && expect.webBundle.mustNotContain) || []).length,
+  );
+  if (readsBundle && b.files.length === 0) {
+    throw new Error(
+      `no readable text files under ${wantedRoot ? `webBundle.root "${wantedRoot}"` : 'the app bundle root'}, ` +
+      'but this manifest has rules that read the shipped bundle -- every one of them would pass vacuously. ' +
+      'Set webBundle.root to where the web layer actually lives (usually "public").',
+    );
   }
   return b;
 });

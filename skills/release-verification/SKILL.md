@@ -31,18 +31,36 @@ lesson trustworthy rather than a rule of thumb:
   behalf. `Info.plist` declared no `NSPhotoLibraryAddUsageDescription`, so iOS
   killed the process under TCC.
 
-  The count is enumerated from the tags rather than recalled, because every
-  narrative version of it, mine included, was an undercount. Walking every
-  `tf/*` tag for "share-and-image reachable in `www/js/app.js` AND the key
-  absent from `Info.plist`" yields **42, 43, 45 through 58** — 16 builds, and
-  `tf/1.5.14+42` is the earliest tag that exists, so this is every tagged build
-  in the repo's history until 59 fixed it. Re-derive it with:
+  The count is enumerated rather than recalled, because every narrative version
+  of it, mine included, was an undercount. The query is a conjunction — the
+  share-image path REACHABLE in the shipped web source *and* the key absent —
+  since a build missing the key is only vulnerable if the path exists. Run in
+  the iheartest repo:
 
   ```bash
   for t in $(git tag -l 'tf/*' | sort -t+ -k2 -n); do
-    git show "$t:ios/App/App/Info.plist" | grep -q NSPhotoLibraryAddUsageDescription || echo "$t"
+    key=$(git show "$t:ios/App/App/Info.plist"  2>/dev/null | grep -c NSPhotoLibraryAddUsageDescription)
+    share=$(git show "$t:www/js/app.js" 2>/dev/null | grep -cE 'navigator\.share|canShare')
+    image=$(git show "$t:www/js/app.js" 2>/dev/null | grep -cE 'toBlob|image/png')
+    [ "${share:-0}" -gt 0 ] && [ "${image:-0}" -gt 0 ] && [ "${key:-1}" -eq 0 ] && echo "$t"
   done
   ```
+
+  Output, verbatim, 16 tags:
+
+  ```
+  tf/1.5.14+42  tf/1.5.15+43  tf/1.5.17+45  tf/1.5.18+46
+  tf/1.5.19+47  tf/1.5.19+48  tf/1.5.20+49  tf/1.5.21+50
+  tf/1.5.21+51  tf/1.6.0+52   tf/1.6.0+53   tf/1.6.0+54
+  tf/1.6.0+55   tf/1.6.0+56   tf/1.6.0+57   tf/1.6.0+58
+  ```
+
+  `tf/1.5.14+42` is the earliest tag the repo has, so this is every tagged build
+  in its history until 59 fixed it. Two caveats worth stating rather than
+  glossing: there is no `+44` tag, and "tagged" is not the same as "reached
+  testers" — the repo's convention tags every TestFlight build, but at least one
+  build (an earlier 59 attempt) never reached App Store Connect. The claim is
+  about tags, which is what the evidence supports.
 
   Apple's own binary scanner cannot
   see it, because that scanner does static API-surface analysis and the app
@@ -185,9 +203,19 @@ artifact check.
    0 or absurdly small, `root` is wrong and every `webBundle` rule is
    vacuously passing.
 4. **Prove the manifest by running it against a build you already know is
-   bad.** A rule that has never failed has never been tested. The iHEARtest
-   manifest was validated by pointing it at Build 58 (caught all three real
-   defects) before Build 59 (clean).
+   bad.** A rule that has never failed has never been tested.
+
+   The iHEARtest manifest was first validated against Build 58, which it failed
+   on all three known defects. That run is **historical and no longer
+   reproducible**: GitHub expires build artifacts after 14 days and Build 58's
+   is gone, so nobody can re-check it, including me. Treat it as a note in the
+   log, not as evidence.
+
+   What survives is reproducible and is what you should copy: the counterfactual
+   in `tests/artifact-truth.test.mjs`, and the one recorded in
+   `receipts/SOURCES.md` — take the real shipped Build 59 `js/app.js` and the
+   real Build 59 `Info.plist`, remove only the photo key, and the rule reports
+   exactly the violation that describes the crash.
 5. Add the `capabilityCoupling` rules for every privacy API the app could
    plausibly reach, including ones you believe it does not. Those produce the
    "no shipped-bundle path matches, and the key is undeclared" line, which is

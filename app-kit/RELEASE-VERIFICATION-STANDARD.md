@@ -132,9 +132,14 @@ version is that source is a claim and the artifact is the fact, and the central
 mechanism is `capabilityCoupling` — derive required Info.plist keys from what
 the shipped bundle can actually reach, rather than maintaining a per-app list.
 
-Proven both directions before adoption: run against iHEARtest Build 58 it
-caught all three known real defects; against Build 59 clean; against AWARE
-clean, with the absent microphone key **cleared** rather than merely unflagged.
+Proven both directions before adoption, with the evidence graded honestly. The
+Build 58 run that caught all three known defects is **historical and not
+reproducible** — GitHub expires build artifacts after 14 days and that one is
+gone. The reproducible proofs are the committed test suite, the recorded runs
+against Build 59 and both AWARE builds (clean, with the absent microphone key
+cleared rather than merely unflagged), and a counterfactual built from the real
+Build 59 bundle with only the photo key removed, which reports exactly the
+violation describing the crash.
 A committed test suite builds synthetic known-bad IPAs and pins the whole
 truth table plus the exit-code contract, so that proof is repeatable by anyone
 rather than resting on artifacts that happened to be on one machine.

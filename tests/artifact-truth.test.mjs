@@ -588,3 +588,46 @@ test('text that merely contains a plist-shaped fragment is not accepted as a pli
     assert.equal(code, 2, out);
     assert.match(out, /not XML plist content/);
 });
+
+// --- zero scanned files is fatal whenever any rule reads the bundle ---------
+// The first version of this guard read `if (wantedRoot && files.length === 0)`,
+// so a manifest with capabilityCoupling and no webBundle.root fell straight
+// through: the scan rooted at the .app itself, found no text (a real bundle's
+// top level is compiled binaries), every coupling rule reported "no
+// shipped-bundle path matches", and the run printed CLEAN.
+//
+// Verifying nothing and finding nothing printed the same way -- inside the
+// guard written to stop exactly that. Condition the check on what the RULES
+// need, never on what the manifest happened to mention.
+
+test('capabilityCoupling with no webBundle.root and no scanned files exits 2', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST, web: {} });
+    const manifest = makeManifest({
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /would pass vacuously/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('renderedVersion with no root and no scanned files exits 2', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST, web: {} });
+    const manifest = makeManifest({ renderedVersion: { file: 'index.html', elementId: 'app-version-tag' } });
+    assert.equal(run(ipa, manifest).code, 2);
+});
+
+test('webBundle rules with no root and no scanned files exit 2', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST, web: {} });
+    const manifest = makeManifest({ webBundle: { mustNotContain: [{ pattern: 'getUserMedia' }] } });
+    assert.equal(run(ipa, manifest).code, 2);
+});
+
+test('a plist-only manifest still passes with no scanned files', () => {
+    // The guard keys on what the rules need. A manifest that never reads the
+    // bundle has nothing to pass vacuously, so an empty scan is fine there.
+    const ipa = makeIpa({ plist: BASE_PLIST, web: {} });
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+});
