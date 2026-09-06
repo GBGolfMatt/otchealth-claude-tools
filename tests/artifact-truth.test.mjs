@@ -618,6 +618,28 @@ test('present-but-unusable is reported differently from absent', () => {
     assert.match(run(absent, manifest).out, /does NOT declare NSPhotoLibraryAddUsageDescription/);
 });
 
+test('an unusable purpose string is a violation even with NO bundle match and no forbidIfUnreachable', () => {
+    // Pins the documented fifth row. The other four rows are about coupling;
+    // this one is about the key being broken on its own terms -- iOS renders an
+    // empty permission prompt regardless of what the web layer reaches.
+    //
+    // Documented and implemented behaviour had drifted apart here: the table
+    // described a two-valued plist axis (absent / declared) and this third
+    // state fell through the gap. The code was right and the docs were wrong,
+    // which is the less common direction and the easier one to miss.
+    const ipa = makeIpa({
+        plist: { ...BASE_PLIST, NSMicrophoneUsageDescription: '' },
+        web: { 'js/app.js': 'renderToday();' },   // nothing matches getUserMedia
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /not a usable purpose string/);
+});
+
 test('a real purpose string still passes', () => {
     const ipa = makeIpa({
         plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: 'Save your result card to Photos.' },
@@ -858,6 +880,41 @@ function makeSymlinkIpa({ linkName, target, extra = {} }) {
     execFileSync('zip', ['-q', '-r', '-y', ipa, 'Payload'], { cwd: dir });
     return ipa;
 }
+
+test('a .app that is ITSELF a symlink out of Payload/ is fatal', () => {
+    // The boundary has to be anchored to the extraction directory, not to the
+    // .app. readShippedText trusts realpath(appDir) as its base, which is only
+    // sound if appDir is inside the extraction -- and an archive can store
+    // Payload/App.app as a symlink.
+    //
+    // Reproduced against the pre-fix code: it read the FOREIGN Info.plist
+    // (reporting a version that never shipped), scanned the foreign web layer,
+    // and emitted a violation naming a file the artifact does not contain. The
+    // downstream symlink checks could not help, because a base derived from the
+    // compromised value makes every foreign path trivially "inside" it.
+    const foreign = tmp('foreign-app');
+    const foreignApp = path.join(foreign, 'App.app');
+    fs.mkdirSync(path.join(foreignApp, 'public'), { recursive: true });
+    fs.writeFileSync(path.join(foreignApp, 'Info.plist'), plistXml({ ...BASE_PLIST, CFBundleShortVersionString: '9.9.9' }));
+    fs.writeFileSync(path.join(foreignApp, 'public', 'secret.js'), 'navigator.mediaDevices.getUserMedia({})');
+
+    const dir = tmp('appsym');
+    fs.mkdirSync(path.join(dir, 'Payload'), { recursive: true });
+    fs.symlinkSync(foreignApp, path.join(dir, 'Payload', 'App.app'));
+    const ipa = path.join(dir, 'App.ipa');
+    execFileSync('zip', ['-q', '-r', '-y', ipa, 'Payload'], { cwd: dir });
+
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /symlink/i);
+    assert.doesNotMatch(out, /VERDICT/);
+    assert.doesNotMatch(out, /secret\.js/, 'named a file from outside the artifact');
+    assert.doesNotMatch(out, /9\.9\.9/, 'reported a version read from outside the artifact');
+});
 
 test('a webBundle.root that is a SYMLINK out of the .app is fatal', () => {
     // path.resolve is lexical and never touches the filesystem, so the string

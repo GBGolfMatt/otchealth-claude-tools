@@ -82,7 +82,33 @@ function extract(ipa) {
   if (!fs.existsSync(payload)) throw new Error(`no Payload/ inside ${ipa} -- not an iOS app archive?`);
   const app = fs.readdirSync(payload).find((n) => n.endsWith('.app'));
   if (!app) throw new Error(`no .app bundle inside Payload/ of ${ipa}`);
-  return { root: dir, appDir: path.join(payload, app) };
+  const appDir = path.join(payload, app);
+
+  // ANCHOR THE BOUNDARY HERE, not downstream. readShippedText treats
+  // realpath(appDir) as its trusted base, which is only sound if appDir is
+  // itself inside the extraction. It is not automatically: an archive can store
+  // `Payload/App.app` (or `Payload` itself) as a SYMLINK, and unzip restores it.
+  //
+  // Reproduced before fixing. With the .app a symlink to a foreign bundle, the
+  // run read that bundle's Info.plist -- reporting version 9.9.9, which never
+  // shipped -- scanned its web layer, and emitted a violation naming a file the
+  // artifact does not contain. The downstream symlink checks could not help,
+  // because deriving the trusted base FROM the compromised value makes every
+  // foreign path trivially "inside" it.
+  //
+  // A boundary is only as good as the thing it is anchored to, so anchor to the
+  // directory this process created and validate inward from there.
+  const realDir = fs.realpathSync(dir);
+  const within = (child, parent) => child === parent || child.startsWith(parent + path.sep);
+  const realPayload = fs.realpathSync(payload);
+  if (!within(realPayload, realDir)) {
+    throw new Error(`Payload/ in ${path.basename(ipa)} resolves to ${realPayload}, outside the extraction directory -- the archive stores it as a symlink`);
+  }
+  const realApp = fs.realpathSync(appDir);
+  if (!within(realApp, realPayload)) {
+    throw new Error(`${app} resolves to ${realApp}, outside the extracted Payload/ -- the archive stores the .app as a symlink, so nothing under it is evidence about this artifact`);
+  }
+  return { root: dir, appDir };
 }
 
 // plutil is macOS-only, so convert the binary plist ourselves. Info.plist in a

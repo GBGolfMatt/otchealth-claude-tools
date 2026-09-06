@@ -154,14 +154,27 @@ exit 2, not a silently wider scan.
 }
 ```
 
-`capabilityCoupling` has four outcomes, and three of them are passes:
+`capabilityCoupling` outcomes. Note the plist axis is **three-valued**, not two:
+a key can be absent, present with a usable purpose string, or present with a
+value that is not a usable purpose string (empty, whitespace, non-string).
 
-| Text match in shipped bundle | Declared in plist | Verdict |
+| Text match in shipped bundle | Plist key | Verdict |
 |---|---|---|
-| yes | no  | **VIOLATION** — the TCC kill |
-| yes | yes | pass, "shipped bundle matches ... AND the key is declared" |
-| no  | no  | pass, "no shipped-bundle path matches, and the key is undeclared" (this is AWARE) |
-| no  | yes | violation **only if** `forbidIfUnreachable: true`, otherwise a pass that says the key *is* declared and tolerated |
+| yes | absent | **VIOLATION** — the TCC kill |
+| yes | usable | pass, "shipped bundle matches ... AND the key is declared" |
+| no  | absent | pass, "no shipped-bundle path matches, and the key is undeclared" (this is AWARE) |
+| no  | usable | violation **only if** `forbidIfUnreachable: true`, otherwise a pass that says the key *is* declared and tolerated |
+| either | **present but unusable** | **VIOLATION, unconditionally** |
+
+That last row does not depend on the match or on `forbidIfUnreachable`, and an
+earlier version of this table omitted it — so the documented behaviour and the
+implemented behaviour disagreed until a review pass caught it.
+
+It is deliberate rather than an oversight in the code. A usage-description is
+the sentence iOS shows in the permission prompt; `""` renders an empty prompt
+and draws an App Review rejection whether or not anything reaches the API. It is
+a defect in the artifact on its own terms, so it is reported on its own terms.
+The other rows are about *coupling*; this one is about the key being broken.
 
 The left column says *text match*, not *reachable*, and so does every line the
 tool prints. It is a scan of the shipped bytes: it can hit a comment or dead
