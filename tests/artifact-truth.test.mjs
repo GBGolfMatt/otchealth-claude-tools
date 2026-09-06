@@ -839,6 +839,86 @@ test('a legitimate nested root inside the .app still works', () => {
     assert.match(out, /does NOT declare NSPhotoLibraryAddUsageDescription/);
 });
 
+// A symlink escape needs an IPA built with real symlink entries, which makeIpa
+// does not do. An IPA is a zip and zips carry symlinks; `zip --symlinks` stores
+// them and unzip restores them, so this is reachable by anything that produces
+// an archive, not a contrived case.
+function makeSymlinkIpa({ linkName, target, extra = {} }) {
+    const dir = tmp('symipa');
+    const appDir = path.join(dir, 'Payload', 'App.app');
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.writeFileSync(path.join(appDir, 'Info.plist'), plistXml(BASE_PLIST));
+    for (const [rel, text] of Object.entries(extra)) {
+        const abs = path.join(appDir, rel);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, text);
+    }
+    fs.symlinkSync(target, path.join(appDir, linkName));
+    const ipa = path.join(dir, 'App.ipa');
+    execFileSync('zip', ['-q', '-r', '-y', ipa, 'Payload'], { cwd: dir });
+    return ipa;
+}
+
+test('a webBundle.root that is a SYMLINK out of the .app is fatal', () => {
+    // path.resolve is lexical and never touches the filesystem, so the string
+    // checks pass this cleanly. Reproduced against the pre-fix code: it read
+    // the foreign file and emitted a VIOLATION naming it -- manufacturing an
+    // actionable, quotable finding out of bytes that never shipped, which is
+    // worse than suppressing a real one.
+    const outside = tmp('outside');
+    fs.writeFileSync(path.join(outside, 'secret.js'), 'navigator.mediaDevices.getUserMedia({})');
+    const ipa = makeSymlinkIpa({ linkName: 'public', target: outside });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /symlink/i);
+    assert.doesNotMatch(out, /VERDICT/);
+    assert.doesNotMatch(out, /secret\.js/, 'named a file from outside the artifact');
+});
+
+test('a symlink DEEPER inside a legitimate root is fatal too', () => {
+    // Guarding only the root would leave the tree below it open.
+    const outside = tmp('outside-deep');
+    fs.writeFileSync(path.join(outside, 'secret.js'), 'navigator.mediaDevices.getUserMedia({})');
+    const ipa = makeSymlinkIpa({
+        linkName: 'public/vendor',
+        target: outside,
+        extra: { 'public/js/app.js': 'renderToday();' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /symlink/i);
+    assert.doesNotMatch(out, /secret\.js/, 'named a file from outside the artifact');
+});
+
+test('a symlink pointing back INSIDE the bundle is followed, and counted once', () => {
+    // The false-positive guard. Refusing every symlink would be easy and wrong:
+    // an inside-pointing link ships real bytes and must still be scanned.
+    // Deduped by resolved identity, so reaching one file through both its real
+    // path and an alias does not double the file count or print it twice in a
+    // violation's evidence.
+    const ipa = makeSymlinkIpa({
+        linkName: 'public/alias',
+        target: 'real',
+        extra: { 'public/real/share.js': 'navigator.share({})' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /1 text files under public/);
+    assert.match(out, /\(real\/share\.js\)/);   // once, not "real/share.js, real/share.js"
+});
+
 test('capabilityCoupling with no webBundle.root is refused outright', () => {
     // Now a contract violation in its own right, not merely a vacuous-pass risk.
     // Without a root the scan walked the entire .app, and an .app carries

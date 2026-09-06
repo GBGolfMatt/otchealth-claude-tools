@@ -275,6 +275,15 @@ asserting the pair. `iheartest/qa/release-verification/` is the worked example.
   Flatstick), match on strings that survive minification, and verify by
   running the rule against a build known to contain the capability.
 - **Encrypted or unusual IPA layouts** exit 2 rather than guessing.
+- **The artifact boundary is enforced, and it took three checks.** `webBundle.root`
+  must be relative, must contain no `..` segment, and must resolve inside the
+  `.app` — but all three of those are string tests, and an IPA is a zip, so it
+  can carry **symlinks**. A `public` symlinked to an absolute path outside the
+  bundle passed every lexical check and made the tool read foreign bytes. So the
+  root and every symlink met during the walk are resolved with `realpathSync`
+  and required to stay inside the real app directory; anything else is exit 2.
+  A symlink pointing back inside is legitimate and is followed, deduped by
+  resolved identity so one file is not counted twice.
 - **The XML plist reader is a structural floor, not a validating parser.** It
   requires the bplist magic, or an XML document that opens `<plist>`/`<dict>`,
   *closes* `</plist>`, and has balanced `<dict>` and `<key>` tags — then reads

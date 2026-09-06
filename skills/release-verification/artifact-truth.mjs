@@ -210,11 +210,23 @@ function readShippedText(appDir, subdir) {
   //
   // Rejected here rather than sanitized: a root that points outside the bundle
   // is a broken manifest, and silently rewriting it to something safe would hide
-  // that. Checked structurally (no absolute, no ".." segment) AND positionally
-  // (the resolved path must sit inside appDir), because either check alone can
-  // be walked around -- symlinks and normalization differences defeat the string
-  // test, and a crafted relative path can normalize back inside while still
-  // being wrong.
+  // that.
+  //
+  // THREE checks, because the first two are lexical and lexical is not enough.
+  // The structural test (no absolute, no ".." segment) and the positional test
+  // (path.resolve must land inside appDir) both operate on the STRING. An
+  // earlier version of this comment claimed the positional test covered
+  // symlinks; it does not, because path.resolve never touches the filesystem.
+  //
+  // That gap was real and reproduced: an IPA is a zip, zips carry symlink
+  // entries, and unzip restores them. With `public` a symlink to an absolute
+  // path outside the .app, the scan read a file that never shipped and emitted
+  // a VIOLATION naming it. Manufacturing a finding from foreign bytes is worse
+  // than suppressing one, because it is actionable and quotable.
+  //
+  // So the third check resolves real paths (`fs.realpathSync`) for the root and
+  // for every symlinked entry encountered during the walk, and requires each to
+  // stay inside the real appDir.
   if (subdir !== undefined && subdir !== null) {
     if (typeof subdir !== 'string' || subdir.trim() === '') {
       throw new Error(`webBundle.root must be a non-empty string (got ${JSON.stringify(subdir)})`);
@@ -234,13 +246,45 @@ function readShippedText(appDir, subdir) {
   const root = subdir ? path.join(appDir, subdir) : appDir;
   const files = [];
   if (!fs.existsSync(root)) return { root, files, missing: true };
+
+  // The real-path floor. Everything below this line may only read bytes that
+  // live inside the extracted .app on disk, symlinks resolved.
+  const realBase = fs.realpathSync(appDir);
+  const inside = (p) => p === realBase || p.startsWith(realBase + path.sep);
+  const realRoot = fs.realpathSync(root);
+  if (!inside(realRoot)) {
+    throw new Error(`webBundle.root "${subdir}" resolves through a symlink to ${realRoot}, outside the shipped .app; only bytes from the artifact may inform a verdict`);
+  }
+
   const TEXT = new Set(['.html', '.js', '.mjs', '.cjs', '.json', '.css', '.svg', '.txt']);
+  // Dedupe by RESOLVED identity. An inside-pointing symlink is legitimate and is
+  // followed, but without this the same shipped bytes are read through both
+  // paths -- which double-counts the "N text files" line and prints the same
+  // file twice in a violation's evidence list. One file, one entry.
+  const seen = new Set();
   (function walk(dir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, e.name);
-      if (e.isDirectory()) walk(abs);
-      else if (TEXT.has(path.extname(e.name).toLowerCase())) {
-        files.push({ rel: path.relative(root, abs), text: fs.readFileSync(abs, 'utf8') });
+      let target = abs;
+      if (e.isSymbolicLink()) {
+        // A symlink DEEPER in the tree escapes just as well as one at the root,
+        // so resolve every one. Pointing back inside the bundle is harmless and
+        // is followed; pointing out is fatal. A dangling link resolves to
+        // nothing -- skip it rather than crash, since it ships no bytes.
+        try { target = fs.realpathSync(abs); } catch { continue; }
+        if (!inside(target)) {
+          throw new Error(`${path.relative(realBase, abs)} is a symlink to ${target}, outside the shipped .app; a verdict must not be informed by bytes the artifact does not contain`);
+        }
+      }
+      const st = fs.statSync(target);
+      if (st.isDirectory()) {
+        if (seen.has(target)) continue;   // also stops a symlink cycle from recursing forever
+        seen.add(target);
+        walk(target);
+      } else if (TEXT.has(path.extname(e.name).toLowerCase())) {
+        if (seen.has(target)) continue;
+        seen.add(target);
+        files.push({ rel: path.relative(root, abs), text: fs.readFileSync(target, 'utf8') });
       }
     }
   })(root);
