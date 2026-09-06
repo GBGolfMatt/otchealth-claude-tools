@@ -1,6 +1,6 @@
 ---
 name: release-verification
-description: Verify what a build actually SHIPPED rather than what its repo says, before a human reviewer ever sees it. Run "node artifact-truth.mjs --ipa <App.ipa> --manifest schema/<app>.release-truth.json" against the downloaded artifact to check Info.plist expectations, shipped-web-bundle content, and capability coupling (any privacy API reachable in the shipped bundle must have its usage-description key declared, or iOS terminates the process under TCC). Exit 0 clean, 1 violations, 2 artifact unreadable. Use before every TestFlight hand-off, and read app-kit/RELEASE-VERIFICATION-STANDARD.md for the surrounding five-stage process and the A/B/C packet-item classification that decides what a human is allowed to be asked.
+description: Verify what a build actually SHIPPED rather than what its repo says, before a human reviewer ever sees it. Run "node artifact-truth.mjs --ipa <App.ipa> --manifest schema/<app>.release-truth.json" against the downloaded artifact to check Info.plist expectations, shipped-web-bundle content, and capability coupling (if the shipped bundle's text matches a privacy API's pattern, its usage-description key must be declared, or iOS terminates the process under TCC). Exit 0 clean, 1 violations, 2 artifact unreadable. Use before every TestFlight hand-off, and read app-kit/RELEASE-VERIFICATION-STANDARD.md for the surrounding five-stage process and the A/B/C packet-item classification that decides what a human is allowed to be asked.
 ---
 
 # release-verification
@@ -59,7 +59,7 @@ verdicts, no special-casing, and it stays right when an app changes.
 Read the verdicts at their real strength. This is a text scan, so a violation
 is a strong signal worth blocking on, while a pass means *no shipped-bundle
 path matches these patterns*, not *this app cannot reach that API*. A literal
-match in a comment or dead code counts as reachable; a dynamically built or
+match in a comment or dead code counts as a hit; a dynamically built or
 minified reference can be missed; native-only reach is invisible here by
 construction. The tool's own output is worded that way on purpose, so a line
 lifted out of it into a reviewer packet stays true.
@@ -136,12 +136,23 @@ families, all optional:
 
 `capabilityCoupling` has four outcomes, and three of them are passes:
 
-| Reachable in bundle | Declared in plist | Verdict |
+| Text match in shipped bundle | Declared in plist | Verdict |
 |---|---|---|
 | yes | no  | **VIOLATION** — the TCC kill |
-| yes | yes | pass, "reachable AND declared" |
+| yes | yes | pass, "shipped bundle matches ... AND the key is declared" |
 | no  | no  | pass, "no shipped-bundle path matches, and the key is undeclared" (this is AWARE) |
 | no  | yes | violation **only if** `forbidIfUnreachable: true`, otherwise a pass that says the key *is* declared and tolerated |
+
+The left column says *text match*, not *reachable*, and so does every line the
+tool prints. It is a scan of the shipped bytes: it can hit a comment or dead
+code, and it can miss a dynamically built reference. Saying "reaches" would
+claim a control-flow analysis nobody ran, and these lines get pasted into PR
+comments and reviewer packets where the qualifier would be lost. The verdict
+still blocks — a match plus a missing key is exactly the shape of the real
+crash, and the fix for a genuine hit (declare the key) is right either way — but
+the wording asserts only what was established. `forbidIfUnreachable` keeps its
+name because renaming a published manifest key would break every manifest; it is
+the output that gets quoted.
 
 Set `forbidIfUnreachable` when over-declaring is itself a problem (App Review
 scrutiny, misleading permission prompts). Leave it off where a key is

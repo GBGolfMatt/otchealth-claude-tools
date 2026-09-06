@@ -79,7 +79,7 @@ const BASE_PLIST = { CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersion
 
 // --- the coupling truth table ----------------------------------------------
 
-test('reachable capability with no declared key is a violation (the TCC crash)', () => {
+test('a matched capability with no declared key is a violation (the TCC crash)', () => {
     const ipa = makeIpa({
         plist: BASE_PLIST,
         web: { 'js/share.js': 'if (navigator.share) { shareCard(); }' },
@@ -92,7 +92,7 @@ test('reachable capability with no declared key is a violation (the TCC crash)',
     assert.match(out, /does NOT declare NSPhotoLibraryAddUsageDescription/);
 });
 
-test('reachable capability with the key declared passes', () => {
+test('a matched capability with the key declared passes', () => {
     const ipa = makeIpa({
         plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: 'Save your result card.' },
         web: { 'js/share.js': 'if (navigator.share) { shareCard(); }' },
@@ -102,7 +102,46 @@ test('reachable capability with the key declared passes', () => {
     });
     const { code, out } = run(ipa, manifest);
     assert.equal(code, 0, out);
-    assert.match(out, /reachable in bundle AND declared/);
+    assert.match(out, /shipped bundle matches .* AND the key is declared/);
+});
+
+test('no output line claims REACHABILITY, because only a text match was established', () => {
+    // The tool scans the shipped web layer as text. It cannot resolve control
+    // flow, so a hit in a comment or in dead code counts and a dynamically
+    // built reference is missed. Saying a bundle "reaches" an API claims an
+    // analysis nobody ran -- and these exact lines get pasted into reviewer
+    // packets and PR comments, where the qualifier does not travel with them.
+    //
+    // The verdict is unchanged and still blocks: a match with no declared key
+    // is the exact shape of the real TCC crash, and the fix for a genuine hit
+    // (declare the key) is correct either way. Only the claim is narrowed.
+    //
+    // Asserted over BOTH branches, because the earlier rounds tightened the
+    // pass lines and left the violation lines saying "reaches" -- which is
+    // backwards, since the violation lines are the quotable ones.
+    const web = { 'js/share.js': 'if (navigator.share) { shareCard(); }' };
+    const rule = { ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription' };
+
+    const violating = run(
+        makeIpa({ plist: BASE_PLIST, web }),
+        makeManifest({ capabilityCoupling: [rule] }),
+    );
+    assert.equal(violating.code, 1, violating.out);
+
+    const passing = run(
+        makeIpa({ plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: 'Save your card.' }, web }),
+        makeManifest({ capabilityCoupling: [rule] }),
+    );
+    assert.equal(passing.code, 0, passing.out);
+
+    // Fails against the old code, which printed "shipped bundle reaches ..."
+    // and "reachable in bundle AND declared".
+    for (const { label, out } of [{ label: 'violation', out: violating.out }, { label: 'pass', out: passing.out }]) {
+        assert.doesNotMatch(out, /bundle reaches/, `${label} output asserts reachability`);
+        assert.doesNotMatch(out, /reachable in bundle/, `${label} output asserts reachability`);
+        // "matches"/"match" is the claim the scan actually supports.
+        assert.match(out, /match/i, `${label} output should describe a text match`);
+    }
 });
 
 test('unreachable and undeclared passes, and says so accurately (the AWARE case)', () => {
@@ -115,7 +154,7 @@ test('unreachable and undeclared passes, and says so accurately (the AWARE case)
     assert.match(out, /no shipped-bundle path matches .* and the key is undeclared/);
 });
 
-test('unreachable but declared is a violation when forbidIfUnreachable is set', () => {
+test('unmatched but declared is a violation when forbidIfUnreachable is set', () => {
     const ipa = makeIpa({
         plist: { ...BASE_PLIST, NSMicrophoneUsageDescription: 'Hear yourself.' },
         web: { 'js/app.js': 'renderToday();' },
@@ -125,7 +164,7 @@ test('unreachable but declared is a violation when forbidIfUnreachable is set', 
     });
     const { code, out } = run(ipa, manifest);
     assert.equal(code, 1, out);
-    assert.match(out, /declares NSMicrophoneUsageDescription but nothing in the shipped bundle/);
+    assert.match(out, /declares NSMicrophoneUsageDescription but no shipped-bundle path matches/);
 });
 
 test('unreachable but declared without forbidIfUnreachable never claims the key is undeclared', () => {

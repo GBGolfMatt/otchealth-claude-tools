@@ -416,7 +416,13 @@ for (const rule of expect.capabilityCoupling || []) {
   // unrelated modules happening to mention each is not evidence of one flow.
   const primary = rx(rule.ifBundleMatches);
   const secondary = rule.andBundleMatches ? rx(rule.andBundleMatches) : null;
-  const reached = bundle.files
+  // Named `matched`, not `reached`. This is a text scan: it establishes that
+  // the shipped bytes CONTAIN the pattern, which is a capability indicator, not
+  // a proof that control flow gets there. A hit in a comment or in dead code
+  // counts; a dynamically built reference is missed. Every message below is
+  // worded to that strength on purpose, because these lines get lifted verbatim
+  // into reviewer packets and PR comments, where an overclaim outlives the run.
+  const matched = bundle.files
     .filter((f) => primary.test(f.text) && (!secondary || secondary.test(f.text)))
     .map((f) => f.rel);
   const pattern = secondary ? `/${rule.ifBundleMatches}/ AND /${rule.andBundleMatches}/` : `/${rule.ifBundleMatches}/`;
@@ -434,24 +440,27 @@ for (const rule of expect.capabilityCoupling || []) {
     violations.push({
       rule: 'capabilityCoupling',
       detail: `Info.plist has ${rule.requirePlistKey} but its value is not a usable purpose string (${JSON.stringify(raw)})`,
-      why: 'iOS shows this string in the permission prompt; an empty or non-string value is not a disclosure, and the shipped bundle ' + (reached.length ? `reaches ${pattern}` : 'may still reach it by a path this text scan cannot see'),
+      why: 'iOS shows this string in the permission prompt; an empty or non-string value is not a disclosure, and the shipped bundle ' + (matched.length ? `textually matches ${pattern}` : 'may still reach it by a path this text scan cannot see'),
     });
-  } else if (reached.length && !declared) {
+  } else if (matched.length && !declared) {
     violations.push({
       rule: 'capabilityCoupling',
-      detail: `shipped bundle reaches ${pattern} (${reached.slice(0, 3).join(', ')}) but Info.plist does NOT declare ${rule.requirePlistKey}`,
-      why: rule.why || 'iOS terminates the process under TCC when an undeclared privacy-sensitive API is reached',
+      detail: `shipped bundle textually matches ${pattern} (${matched.slice(0, 3).join(', ')}) but Info.plist does NOT declare ${rule.requirePlistKey}`,
+      why: (rule.why || 'iOS terminates the process under TCC when an undeclared privacy-sensitive API is reached') + ' -- this is a text match, so confirm the call is live before treating it as the diagnosed cause; the block is fail-safe either way, since the correct fix for a genuine hit is to declare the key',
     });
-  } else if (reached.length && declared) {
-    passes.push(`capability ${rule.requirePlistKey}: reachable in bundle AND declared`);
+  } else if (matched.length && declared) {
+    passes.push(`capability ${rule.requirePlistKey}: shipped bundle matches ${pattern} AND the key is declared`);
   } else if (declared && rule.forbidIfUnreachable) {
     violations.push({
       rule: 'capabilityCoupling',
-      detail: `Info.plist declares ${rule.requirePlistKey} but nothing in the shipped bundle reaches ${pattern}`,
+      detail: `Info.plist declares ${rule.requirePlistKey} but no shipped-bundle path matches ${pattern}`,
       why: 'over-declaring a permission invites App Review questions and misleads users',
     });
   } else if (declared) {
-    // Unreachable but declared, with over-declaring tolerated for this rule.
+    // No text match but declared, with over-declaring tolerated for this rule.
+    // (The manifest key is still spelled `forbidIfUnreachable`; renaming a
+    // published schema key for a wording nit would break every manifest, and
+    // the OUTPUT is what gets quoted.)
     // This used to print "correctly undeclared", which was simply false: the
     // key IS declared. A report that misstates what it found is worse than no
     // report, because it is quotable.

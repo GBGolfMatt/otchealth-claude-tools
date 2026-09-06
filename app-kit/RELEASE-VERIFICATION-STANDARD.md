@@ -186,6 +186,22 @@ The ladder out, cheapest first:
    radio toggles, and fake GPS. A matrix of random fuzz is still random; widen
    *after* step 2.
 
+**Provenance for the numbers above**, so they can be re-checked rather than
+inherited. All read live from our own AWS account (`us-west-2`) on 2026-09-06:
+
+| Claim | How to re-derive it |
+|---|---|
+| 21 runs, all `BUILTIN_FUZZ` | `devicefarm list-projects`, then `list-runs` per project ARN, tallying `.runs[].type` |
+| `XCTEST_UI` needs no custom YAML | `devicefarm get-device-pool-compatibility --device-pool-arn <iheartest-iphone16> --test-type XCTEST_UI` returns compatible |
+| Appium mandates a test spec | the same call with `--test-type APPIUM_NODE` returns `ArgumentException` demanding one |
+| 72 iOS devices, 13 network profiles | `devicefarm list-devices` filtered to `platform=IOS`; `devicefarm list-network-profiles` |
+
+Two honest limits on the census. It counts runs the account still returns, so a
+run aged out of Device Farm's retention would not appear — read "21" as *every
+run visible to us*, which is the number that matters for the claim being made
+(nobody has scripted anything). And device and profile inventories are AWS's to
+change; re-run the call rather than quoting this table a year from now.
+
 **Read Device Farm results correctly.** Two traps, both hit for real:
 
 - A `bug_type` **309** `.ips` is a crash. A **308** with `is_simulated` is a
@@ -215,6 +231,19 @@ labelled, in plain words, as not independently verified.
 
 The point of four engines is **independence**, not throughput. A second opinion
 from the seat that wrote the code is not a second opinion.
+
+Grade these four paragraphs differently, because they are not equally proven.
+The Claude Code and subagent lanes are what this document was written from, so
+they are described from use. The ChatGPT lane's mechanics were verified live on
+2026-08-29 (an `occ_gpt_cto` authorization-code exchange against
+`mcp.otchealth.app`, 17 of 17 checks) — but *that it produces good adversarial
+review* is a design intent nobody has run yet. The Codex constraints ("no
+inbound API", separately funded, `AGENTS.md` limits) come from a vendor-docs
+research pass on 2026-08-29, not from operating it, and the lane is blocked on
+the owner action noted below, so treat that paragraph as a plan. HyperAgent's is
+a plan too. **Nothing below the first two paragraphs has shipped**; they are here
+because the split is the design, and saying so is cheaper than discovering later
+which parts were aspiration.
 
 **Claude Code (this seat) — owner.**
 Writes the gates, reads every diff, runs artifact-truth, holds merge authority,
