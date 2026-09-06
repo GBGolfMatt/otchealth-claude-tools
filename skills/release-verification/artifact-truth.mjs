@@ -7,9 +7,11 @@
 //   iHEARtest, 2026-09-05. The share card hands a PNG to the iOS share sheet.
 //   Choosing "Save Image" writes to the photo library on the app's behalf.
 //   Info.plist had no NSPhotoLibraryAddUsageDescription, so iOS terminated the
-//   process under TCC. Enumerated from the tags rather than recalled: it
-//   shipped in 42, 43 and 45 through 58 -- 16 tagged builds, every one in the
-//   repo's history until 59. Apple's own
+//   process under TCC. Enumerated from the tags rather than recalled: the same
+//   defect is present in the SOURCE of 42, 43 and 45 through 58 -- 16 tagged
+//   builds, every one in the repo's history until 59. That is a source-level
+//   blast radius, not 16 verified artifacts: those IPAs expired long ago, and
+//   this file's whole point is that the two are different. Apple's own
 //   binary scanner cannot catch it: that scanner does static API-surface
 //   analysis and the app links no PhotoKit -- the share sheet reaches the
 //   library for us. Only a real device shows it, as a runtime kill.

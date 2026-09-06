@@ -25,18 +25,20 @@ repo answers a question nobody asked. Two incidents in one week made this
 concrete, and they point in **opposite** directions, which is what makes the
 lesson trustworthy rather than a rule of thumb:
 
-- **iHEARtest, 16 tagged builds.** Reading the repo would not have flagged
+- **iHEARtest, 16 tagged builds by source.** Reading the repo would not have flagged
   anything. The shipped app hands a PNG to the iOS share sheet; a user
   choosing *Save Image* causes a write to the photo library on the app's
   behalf. `Info.plist` declared no `NSPhotoLibraryAddUsageDescription`, so iOS
   killed the process under TCC.
 
-  The count is derived, not recalled: **16 tagged builds** — 42, 43, and 45
-  through 58, which is every tagged build the repo has until 59 fixed it. The
-  query and its verbatim output live in
-  `receipts/INCIDENT-SCOPE.md`, along with the two caveats (there is no `+44`
-  tag, and "tagged" is not "reached testers"). It is recorded there rather than
-  restated here so the number has one home instead of two that can drift.
+  The count is derived, not recalled: **16 tagged builds carry the defect in
+  source** — 42, 43, and 45 through 58, which is every tagged build the repo has
+  until 59 fixed it. Note the wording: that is a `git show` query, so it is a
+  source-level blast radius rather than 16 verified artifacts, and by this
+  document's own thesis those are different things. The query, its verbatim
+  output and all three caveats live in `receipts/INCIDENT-SCOPE.md`. It is
+  recorded there rather than restated here so the number has one home instead of
+  two that can drift.
 
   Every narrative version of this count was an undercount, each inheriting the
   last, which is why it is a committed query now rather than a sentence.
