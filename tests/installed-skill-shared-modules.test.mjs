@@ -33,9 +33,16 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // (`import(\`./model-routing.mjs?t=${x}\`)`, which setup/model-routing.test.mjs really does) is
 // still a real dependency on a real path; only the prefix before any ${ is meaningful.
 const SPECIFIER_FORMS = [
-  /\bfrom\s*["'`]([^"'`$]+)/g,          // import x from "..."  /  export x from "..."
-  /\bimport\s*\(\s*["'`]([^"'`$]+)/g,   // await import("...")
-  /\brequire\s*\(\s*["'`]([^"'`$]+)/g,  // require("...") in any CommonJS holdout
+  /\bfrom\s*["'`]([^"'`$]+)/g,               // import x from "..."  /  export x from "..."
+  /\bimport\s*\(\s*["'`]([^"'`$]+)/g,        // await import("...")
+  /\brequire\s*\(\s*["'`]([^"'`$]+)/g,       // require("...") in any CommonJS holdout
+  // Side-effect-only static import: `import "../../setup/foo.mjs";`. It has NO `from` token, so
+  // the from-specifier pattern above cannot see it. Unused in this repo today, which is exactly
+  // why it is easy to leave out and exactly why it belongs here: the claim these tests make is
+  // about every dependency form, and a claim that happens to hold only because nobody has written
+  // the missing form yet is not the claim being made. The negative lookahead keeps it from also
+  // matching the `import(` call form, which the pattern above already handles.
+  /\bimport\s+(?!\()["'`]([^"'`$]+)/g,
 ];
 
 function specifiersIn(src) {
