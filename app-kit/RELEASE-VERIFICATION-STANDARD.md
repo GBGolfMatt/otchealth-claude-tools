@@ -151,7 +151,7 @@ fuzz suite**: random input, 20-minute budget. Across all 21 Device Farm runs
 this fleet has ever executed — iHEARtest, AWARE, Flatstick, PlantID — **every
 single one was `BUILTIN_FUZZ`. Zero scripted runs, ever.**
 
-Random testing is not a gate, it is a lottery. The TCC crash survived four shipped
+Random testing is not a gate, it is a lottery. The TCC crash survived 16 tagged
 builds and was caught only when one seed happened to walk into the share sheet.
 The ladder out, cheapest first:
 

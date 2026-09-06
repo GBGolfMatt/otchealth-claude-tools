@@ -25,12 +25,25 @@ repo answers a question nobody asked. Two incidents in one week made this
 concrete, and they point in **opposite** directions, which is what makes the
 lesson trustworthy rather than a rule of thumb:
 
-- **iHEARtest, four shipped builds.** Reading the repo would not have flagged
+- **iHEARtest, 16 tagged builds.** Reading the repo would not have flagged
   anything. The shipped app hands a PNG to the iOS share sheet; a user
   choosing *Save Image* causes a write to the photo library on the app's
   behalf. `Info.plist` declared no `NSPhotoLibraryAddUsageDescription`, so iOS
-  killed the process under TCC. It shipped that way in 53, 56, 57 and 58 (54
-  and 55 never shipped, so it is four builds rather than a contiguous range).
+  killed the process under TCC.
+
+  The count is enumerated from the tags rather than recalled, because every
+  narrative version of it, mine included, was an undercount. Walking every
+  `tf/*` tag for "share-and-image reachable in `www/js/app.js` AND the key
+  absent from `Info.plist`" yields **42, 43, 45 through 58** — 16 builds, and
+  `tf/1.5.14+42` is the earliest tag that exists, so this is every tagged build
+  in the repo's history until 59 fixed it. Re-derive it with:
+
+  ```bash
+  for t in $(git tag -l 'tf/*' | sort -t+ -k2 -n); do
+    git show "$t:ios/App/App/Info.plist" | grep -q NSPhotoLibraryAddUsageDescription || echo "$t"
+  done
+  ```
+
   Apple's own binary scanner cannot
   see it, because that scanner does static API-surface analysis and the app
   links no PhotoKit at all.
