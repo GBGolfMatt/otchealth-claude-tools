@@ -108,8 +108,28 @@ Two rules that both came out of real defects:
 
 ### Stage 3 — Artifact truth
 
-`skills/release-verification/artifact-truth.mjs`, run against the **downloaded
-shipped IPA**, before the TestFlight upload.
+`skills/release-verification/artifact-truth.mjs`, run against **the exact IPA
+that is about to be uploaded** (in CI) or **the artifact downloaded from a
+completed run** (out of CI).
+
+Those are two different retrievals of the same bytes, and saying "the downloaded
+shipped IPA, before the upload" — as an earlier draft did — describes something
+that cannot exist: nothing is a shipped artifact before it is shipped. The
+distinction matters because the whole stage rests on verifying what ships, so
+the equivalence has to be shown rather than assumed.
+
+**In CI it is provable, and iHEARtest's `ios-depot.yml` is the worked example.**
+`IPA_PATH` is set once from the export step, an attestation step records that
+file's sha256, the gate runs `--ipa "$IPA_PATH"`, and `altool --upload-package`
+transmits `"$IPA_PATH"`. Same variable, same file, same job, no rebuild in
+between — so the gate inspects the byte-identical file that reaches TestFlight,
+and the attested hash makes that identity recorded rather than merely structural.
+Keep that property when porting: if a workflow ever re-exports or re-signs
+between the gate and the upload, the gate stops being evidence about what ships.
+
+**Out of CI** (the receipts in this skill) the same bytes are retrieved by
+downloading the run artifact. `receipts/SOURCES.md` records each one's run id,
+artifact id and zip digest so the retrieval is checkable.
 
 **Status per app, because "enforced" is a property of a workflow and not of a
 tool.** iHEARtest wires it as a blocking step in `ios-depot.yml`
@@ -186,21 +206,24 @@ The ladder out, cheapest first:
    radio toggles, and fake GPS. A matrix of random fuzz is still random; widen
    *after* step 2.
 
-**Provenance for the numbers above**, so they can be re-checked rather than
-inherited. All read live from our own AWS account (`us-west-2`) on 2026-09-06:
+**Provenance for the numbers above.** Every one of them was read live from AWS
+account `900915535335` / `us-west-2` on 2026-09-06, and the **verbatim output**
+is committed at `skills/release-verification/receipts/DEVICE-FARM-CENSUS.md`
+alongside the exact API operations. It is recorded there rather than restated
+here so the numbers have one home, the same treatment the 16-build count gets.
 
-| Claim | How to re-derive it |
-|---|---|
-| 21 runs, all `BUILTIN_FUZZ` | `devicefarm list-projects`, then `list-runs` per project ARN, tallying `.runs[].type` |
-| `XCTEST_UI` needs no custom YAML | `devicefarm get-device-pool-compatibility --device-pool-arn <iheartest-iphone16> --test-type XCTEST_UI` returns compatible |
-| Appium mandates a test spec | the same call with `--test-type APPIUM_NODE` returns `ArgumentException` demanding one |
-| 72 iOS devices, 13 network profiles | `devicefarm list-devices` filtered to `platform=IOS`; `devicefarm list-network-profiles` |
+An earlier draft of this section listed the commands but not their output. That
+is a recipe, not evidence: nobody re-runs a command before quoting the number
+printed next to it, so the values were unsupported until someone did. The
+receipt also records a trap that produced a confidently wrong answer — a
+compatibility probe without an `appArn` returns HTTP 200 and `compatible=0` for
+*every* test type, including one the pool has run 21 times — and the control
+case that caught it.
 
-Two honest limits on the census. It counts runs the account still returns, so a
-run aged out of Device Farm's retention would not appear — read "21" as *every
-run visible to us*, which is the number that matters for the claim being made
-(nobody has scripted anything). And device and profile inventories are AWS's to
-change; re-run the call rather than quoting this table a year from now.
+Two standing limits: the census counts runs the account still returns, so read
+"21" as *every run visible to us* (which is what the claim needs — nobody has
+scripted anything), and device and profile inventories are AWS's to change, so
+re-run rather than quoting a year from now.
 
 **Read Device Farm results correctly.** Two traps, both hit for real:
 

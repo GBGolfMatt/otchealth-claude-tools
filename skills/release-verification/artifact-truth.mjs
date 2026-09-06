@@ -326,6 +326,30 @@ const plist = inspect('parsing Info.plist', () => {
 
 const wantedRoot = expect.webBundle && expect.webBundle.root;
 const bundle = inspect('reading the shipped web bundle', () => {
+  // A bundle-reading rule REQUIRES an explicit root. Without one the scan walked
+  // the whole .app, which is not the thing these rules make claims about: an
+  // .app carries localization strings, resource JSON and embedded framework
+  // text, so a capability rule could match a file that is not the web payload
+  // and report a violation about code the web layer never contains. The
+  // zero-files guard below cannot catch that, because in the whole-.app case
+  // there ARE files -- just the wrong ones.
+  //
+  // Naming the root also makes the scan deterministic and makes a wrong root
+  // fail loudly (the missing-root branch above) instead of silently widening.
+  // Both real manifests already set "public"; this makes that the contract.
+  const needsRoot = Boolean(
+    expect.renderedVersion ||
+    (expect.capabilityCoupling || []).length ||
+    ((expect.webBundle && expect.webBundle.mustContain) || []).length ||
+    ((expect.webBundle && expect.webBundle.mustNotContain) || []).length,
+  );
+  if (needsRoot && !wantedRoot) {
+    throw new Error(
+      'this manifest has rules that read the shipped bundle but does not set webBundle.root, ' +
+      'so the scan would walk the entire .app rather than the web payload those rules describe. ' +
+      'Set webBundle.root (usually "public").',
+    );
+  }
   const b = readShippedText(art.appDir, wantedRoot);
   // A typo in `root` used to set missing:true, which made every webBundle and
   // capabilityCoupling rule skip and the run print VERDICT: CLEAN. That is the

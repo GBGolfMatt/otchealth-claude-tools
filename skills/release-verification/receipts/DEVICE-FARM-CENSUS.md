@@ -1,0 +1,79 @@
+# Device Farm census: the stage-4 numbers, with their output
+
+`app-kit/RELEASE-VERIFICATION-STANDARD.md` stage 4 asserts several facts about
+our AWS Device Farm account. An earlier draft gave the command to re-derive each
+one but not its output, which a review pass correctly called unsupported: a
+command is a recipe, not evidence, and nobody re-runs a recipe before quoting
+the number next to it.
+
+All of the below was read live from AWS account `900915535335`, region
+`us-west-2`, on **2026-09-06**, via SigV4 `POST /` with
+`x-amz-target: DeviceFarm_20150623.<Operation>`.
+
+## Every run this fleet has executed is a built-in fuzz run
+
+`ListProjects`, then `ListRuns` per project ARN (paging `nextToken`), tallying
+`.runs[].type`:
+
+```
+  AWARE        5 run(s)
+  Flatstick    11 run(s)
+  iHEARtest    5 run(s)
+  iHEARtest    0 run(s)
+TOTAL RUNS: 21
+BY TYPE: {"BUILTIN_FUZZ":21}
+```
+
+21 runs, one type. **Zero scripted runs, ever.** (There are two projects named
+`iHEARtest`; the empty one is a duplicate. It is listed rather than tidied away
+because the tally has to account for every project the API returns.)
+
+The count is of runs the account still returns, so a run aged out of retention
+would not appear. Read it as *every run visible to us*, which is what the claim
+needs: nobody has scripted anything.
+
+## Device and network-profile inventory
+
+`ListDevices` (paged), filtered to `platform: IOS`; `ListNetworkProfiles`:
+
+```
+iOS devices: 72   os range: 15.0.2 .. 26.6
+network profiles: 13  (3G Average, 3G Good, 3G Lossy, Disabled, EDGE Average,
+                       EDGE Good, EDGE Lossy, Full, GPRS, HSDPA, WiFi Average,
+                       WiFi Good, WiFi Lossy)
+```
+
+`Disabled` is the profile that makes "connectivity is dead" a testable state.
+AWS owns this inventory and will change it; re-run rather than quoting this file
+a year from now.
+
+## Test-type compatibility for the existing pool
+
+`GetDevicePoolCompatibility` against pool `iheartest-iphone16`, with a real
+`appArn` (a previously uploaded `IOS_APP`):
+
+```
+  HTTP 200  BUILTIN_FUZZ  compatible=1 incompatible=0
+  HTTP 200  XCTEST_UI     compatible=1 incompatible=0
+  HTTP 400  APPIUM_NODE   ArgumentException Invalid input for ScheduleRun API
+            detected. The service could not schedule a run because the test type
+            you specified is only compatible with custom environment mode. Please
+            edit your request to specify a custom environment mode test spec file.
+```
+
+So XCTest UI needs no custom-environment YAML and no additional artifact on the
+pool we already have, and Appium mandates a test spec. That is the evidence
+behind the stage-4 ladder ordering.
+
+**A trap worth recording, because it produced a confidently wrong answer.** The
+first probe omitted `appArn` and returned HTTP 200 with
+`compatible=0 incompatible=0` for *all four* test types — including
+`BUILTIN_FUZZ`, which this pool has demonstrably run 21 times. Read literally
+that says the pool is incompatible with everything. It does not: with no app to
+evaluate against, the API has nothing to judge and answers with empty lists
+rather than an error.
+
+An all-zero result across a control case you know to be true is the tell. Had
+`BUILTIN_FUZZ` not been in the list as a sanity check, the zero for `XCTEST_UI`
+would have looked like a real finding and reversed the ladder above. **Always
+include a case whose answer you already know.**

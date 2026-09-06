@@ -64,7 +64,15 @@ function makeIpa({ plist = {}, web = {}, webRoot = 'public', rawPlist = null }) 
     return ipa;
 }
 
+// Bundle-reading rules require an explicit webBundle.root, so the default here
+// mirrors what every real manifest does rather than making each test repeat it.
+// Pass `webBundle: null` to deliberately omit the root and exercise that path.
 function makeManifest(expect) {
+    const readsBundle = expect.renderedVersion || (expect.capabilityCoupling || []).length
+        || ((expect.webBundle && expect.webBundle.mustContain) || []).length
+        || ((expect.webBundle && expect.webBundle.mustNotContain) || []).length;
+    if (readsBundle && expect.webBundle === undefined) expect = { ...expect, webBundle: { root: 'public' } };
+    if (expect.webBundle === null) { expect = { ...expect }; delete expect.webBundle; }
     const f = path.join(tmp('manifest'), 'm.json');
     fs.writeFileSync(f, JSON.stringify({ app: 'fixture', expect }, null, 2));
     return f;
@@ -346,10 +354,18 @@ test('renderedVersion fails loud when the file is not where the manifest says', 
         web: { 'index.html': '<span id="app-version-tag">v1.2.3</span>' },
         webRoot: 'public',
     });
-    const manifest = makeManifest({ renderedVersion: { file: 'index.html', elementId: 'app-version-tag' } });
+    // Points at a filename that is not in the bundle. The earlier version of
+    // this test got its miss for a different reason -- it omitted webBundle.root
+    // so the scan walked the whole .app and the file's rel path came back as
+    // "public/index.html" -- which stopped being expressible once a root became
+    // mandatory. Same intent, fixture no longer riding on the loose scan.
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        renderedVersion: { file: 'version.html', elementId: 'app-version-tag' },
+    });
     const { code, out } = run(ipa, manifest);
     assert.equal(code, 1, out);
-    assert.match(out, /cannot find index\.html in the shipped bundle/);
+    assert.match(out, /cannot find version\.html in the shipped bundle/);
 });
 
 // --- the binary-plist parser, on real production bytes ----------------------
@@ -727,9 +743,37 @@ test('a realistic nested plist with arrays and a self-closing <dict\/> still par
 // guard written to stop exactly that. Condition the check on what the RULES
 // need, never on what the manifest happened to mention.
 
-test('capabilityCoupling with no webBundle.root and no scanned files exits 2', () => {
-    const ipa = makeIpa({ plist: BASE_PLIST, web: {} });
+test('capabilityCoupling with no webBundle.root is refused outright', () => {
+    // Now a contract violation in its own right, not merely a vacuous-pass risk.
+    // Without a root the scan walked the entire .app, and an .app carries
+    // localization strings, resource JSON and framework text -- so a rule whose
+    // claim is about the shipped WEB bundle could match something that is not
+    // the web payload at all. The zero-files guard cannot catch that case,
+    // because there are plenty of files, just the wrong ones.
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/app.js': 'x' } });
     const manifest = makeManifest({
+        webBundle: null,
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /does not set webBundle\.root/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('the vacuous-pass guard still fires when a root IS set and holds no text', () => {
+    // The other half of the pair above: root named correctly, directory present
+    // but empty. Rules that read the bundle would all pass having scanned
+    // nothing, which must be exit 2 rather than CLEAN.
+    const dir = tmp('emptyroot');
+    const appDir = path.join(dir, 'Payload', 'App.app');
+    fs.mkdirSync(path.join(appDir, 'public'), { recursive: true });
+    fs.writeFileSync(path.join(appDir, 'Info.plist'), plistXml(BASE_PLIST));
+    const ipa = path.join(dir, 'App.ipa');
+    execFileSync('zip', ['-q', '-r', ipa, 'Payload'], { cwd: dir });
+
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
         capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
     });
     const { code, out } = run(ipa, manifest);

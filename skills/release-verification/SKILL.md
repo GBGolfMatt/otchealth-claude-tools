@@ -92,7 +92,15 @@ loudly.
 
 ## Getting the artifact
 
-The IPA is the input, so fetch the one that shipped, not a rebuild:
+The IPA is the input, so use the bytes that ship, not a rebuild. Two cases, and
+they are genuinely different despite yielding the same file:
+
+- **In CI**, there is no download at all: the gate runs against the exported IPA
+  that the upload step is about to transmit. Nothing is a *shipped* artifact
+  before it is uploaded, so the claim to make is "this is the exact upload
+  candidate", and it holds because the workflow passes one `IPA_PATH` to the
+  gate and to `altool` with no rebuild between them.
+- **Out of CI**, fetch the artifact from the run that produced the build:
 
 ```bash
 # from the Depot/GitHub Actions run that produced the TestFlight build
@@ -107,7 +115,13 @@ different artifact and reintroduces exactly the gap this tool closes.
 ## The manifest
 
 One JSON file per app under `schema/<app>.release-truth.json`. Four rule
-families, all optional:
+families, all optional — except that **any rule which reads the shipped bundle
+(`webBundle.mustContain` / `mustNotContain`, `capabilityCoupling`,
+`renderedVersion`) requires `webBundle.root`**. Without it the scan would walk
+the whole `.app`, which is not what those rules make claims about: an `.app`
+carries localization strings, resource JSON and framework text, so a capability
+rule could match a file the web layer never contains. Omitting the root is
+exit 2, not a silently wider scan.
 
 ```jsonc
 {
