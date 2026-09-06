@@ -111,11 +111,19 @@ Two rules that both came out of real defects:
 `skills/release-verification/artifact-truth.mjs`, run against the **downloaded
 shipped IPA**, before the TestFlight upload.
 
-**Status, stated honestly: this runs by hand today and is not yet wired into any
-app's workflow.** It is meant to be a blocking gate and it is not one yet.
-Calling it mandatory before it is enforced would be the same overclaim this
-standard exists to stop, so: wiring it into each app's iOS workflow is the open
-adoption step, tracked per app in the checklist at the end.
+**Status per app, because "enforced" is a property of a workflow and not of a
+tool.** iHEARtest wires it as a blocking step in `ios-depot.yml`
+(`iheartest#254`); everywhere else it still runs by hand, which makes it a habit
+rather than a gate. Calling it mandatory fleet-wide before that is true would be
+the same overclaim this standard exists to stop.
+
+Wiring is per app and needs no owner action, which is worth saying because I
+assumed otherwise for several days. *Importing* the toolkit at build time needs a
+cross-repo token that only an owner can provision; **vendoring** the single
+dependency-free file needs nothing, and it is the pattern iHEARtest already uses
+for its jsPDF bundle. Record the source commit and the copy's sha256 next to it,
+and assert that pairing in a test, so drift is answerable rather than a guess.
+A blocker that is real for one implementation is not a blocker on the goal.
 
 This is the stage the factory did not have. `grep -rl "Payload/" skills/`
 returned nothing before 2026-09-06: no tool in the toolkit had ever opened a
@@ -276,9 +284,11 @@ only happens when someone thinks to run it is not a gate.
    `cap sync` copy into the bundle, and does any script transform it first?*
    For a two-tree app, name both trees and which one ships.
 3. Pin one device-viewport constant; import it in every browser gate.
-4. Wire artifact-truth into the iOS workflow after archive, before upload. It is
-   NOT wired anywhere yet, so this is a real step, not a formality; until it is
-   done the app's stage 3 is a manual habit rather than a gate.
+4. Wire artifact-truth into the iOS workflow: vendor it, then add a blocking step
+   after the export attestation and BEFORE the device-farm and store uploads.
+   Fail fast, and do not spend device minutes on an artifact already known bad.
+   Copy the shape from `iheartest/qa/release-verification/`. Until this is done
+   the app's stage 3 is a manual habit rather than a gate.
 5. Pin the Device Farm fuzz seed.
 6. Classify the first packet A/B/C. Count the B items. That number is the
    app's verification debt, and it is the backlog Codex works through.

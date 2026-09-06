@@ -184,15 +184,24 @@ artifact check.
 
 ## Where it belongs in CI, and where it actually runs today
 
-**Not yet wired into any app's workflow.** Today it is run by hand from the CTO
-seat against a downloaded artifact before hand-off. Saying otherwise would make
-this document guilty of the exact thing the tool exists to catch: describing a
-gate that does not gate.
+**Enforced in iHEARtest** (`iheartest#254`), a blocking step in `ios-depot.yml`.
+**Run by hand everywhere else**, which makes it a habit rather than a gate there.
+Saying otherwise would make this document guilty of the exact thing the tool
+exists to catch: describing a gate that does not gate.
 
-Wiring it is per-app and it is the next step. It belongs after the archive step
-and **before** the TestFlight upload, so a violation stops the build rather than
-annotating one already in review. It needs only the IPA, `node`, and `unzip`, so
-it runs fine on the Linux side of a workflow against the built artifact.
+Wiring it needs only the IPA, `node` and `unzip`, so it runs fine on the Linux
+side of a workflow. Two placement rules, both learned the hard way:
+
+- **After the export attestation, before the device-farm and store uploads.** My
+  first draft sat just before the TestFlight upload, which is correct and
+  wasteful: a sub-second check would wait out a 45-minute device poll before it
+  could block, and spend real device minutes on an artifact already known bad.
+- **Exit 2 must block too.** An artifact the gate could not open is not evidence
+  of anything.
+
+Vendor the file rather than importing it if the app's workflow has no cross-repo
+token, and record the source commit plus the copy's sha256 beside it with a test
+asserting the pair. `iheartest/qa/release-verification/` is the worked example.
 
 ## Known limits (state these, do not paper over them)
 
