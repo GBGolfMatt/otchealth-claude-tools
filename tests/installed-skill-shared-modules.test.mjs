@@ -45,7 +45,17 @@ const SPECIFIER_FORMS = [
   // `\s*` plus optional block-comment trivia, not `\s+`: `import"x.mjs"` and
   // `import /* c */ "x.mjs"` both parse (verified with node --check), and the first draft of this
   // pattern required literal whitespace, so both evaded it.
-  /\bimport\s*(?:\/\*[^]*?\*\/\s*)*(?!\()["'`]([^"'`$]+)/g,
+  // The block-comment part is the classic UNROLLED-LOOP form, not the obvious `\/\*[^]*?\*\/`.
+  // Wrapping a lazy `[^]*?` in an outer `*` is a nested quantifier: there are many ways to split a
+  // run of `/**/` between the inner and outer repetitions, so a non-matching input forces the
+  // engine to try them all. Measured on `"import " + "/**/".repeat(n) + "!"`, the lazy version goes
+  // 0.2ms at n=14 to 27.6ms at n=22, roughly 4x per two repetitions, which is exponential; CodeQL
+  // flagged it high severity as "Inefficient regular expression" and was right. The unrolled form
+  // below can match a comment exactly one way, so the ambiguity is gone: same input, flat at
+  // microseconds. Input here is repo source rather than attacker-controlled, so this was a CI-hang
+  // risk rather than a live DoS, but a known-exponential regex in a shared toolkit is the kind of
+  // thing that gets copied somewhere it does matter.
+  /\bimport\s*(?:\/\*[^*]*\*+(?:[^\/*][^*]*\*+)*\/\s*)*(?!\()["'`]([^"'`$]+)/g,
 ];
 
 // ON THE LIMITS OF THIS METHOD, stated rather than papered over. These are regexes, not a
