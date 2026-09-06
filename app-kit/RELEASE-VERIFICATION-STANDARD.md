@@ -137,6 +137,12 @@ tool.** iHEARtest wires it as a blocking step in `ios-depot.yml`
 rather than a gate. Calling it mandatory fleet-wide before that is true would be
 the same overclaim this standard exists to stop.
 
+**That wiring lives in another repository, so it is not checkable from this
+one.** The workflow step, the vendored verifier and its six tests are all in
+`iheartest#254` and nowhere in this diff. Treat the enforcement claim as
+external and verifiable there, not as something this PR demonstrates -- the
+same standard of evidence this document asks of everything else.
+
 Wiring is per app and needs no owner action, which is worth saying because I
 assumed otherwise for several days. *Importing* the toolkit at build time needs a
 cross-repo token that only an owner can provision; **vendoring** the single
@@ -185,10 +191,14 @@ The ladder out, cheapest first:
    sequence every time" — so a crash reproduces, and a fix is provably a fix
    rather than a different roll. Do this immediately; it is the highest
    value-per-effort item in this document.
-2. **XCTest UI (XCUITest).** Verified live against our own account: `BUILTIN_FUZZ`,
-   `XCTEST`, and `XCTEST_UI` are all compatible with the existing
-   `iheartest-iphone16` pool **with no additional artifact and no custom
-   environment YAML**. Upload types `IOS_APP` + `XCTEST_UI_TEST_PACKAGE`.
+2. **XCTest UI (XCUITest).** Verified live against our own account:
+   `BUILTIN_FUZZ`, `XCTEST` and `XCTEST_UI` are all compatible with the existing
+   `iheartest-iphone16` pool **with no custom-environment YAML and no change to
+   the device pool**. An XCUITest run does of course need its own test bundle
+   (upload types `IOS_APP` + `XCTEST_UI_TEST_PACKAGE`) -- an earlier draft said
+   "no additional artifact" two clauses before naming the additional artifact,
+   which was simply wrong. Writing the tests IS the work; what this bullet
+   establishes is that the surrounding infrastructure needs nothing new.
    XCUITest reads WKWebView content through the standard accessibility
    hierarchy, so a Capacitor app is reachable without any webview-context
    gymnastics. This is where class B items that need a real device go — item 16

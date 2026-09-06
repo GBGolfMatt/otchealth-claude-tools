@@ -215,6 +215,41 @@ test('andBundleMatches narrows a share rule to the file that also handles an ima
     assert.match(r.out, /AND/);
 });
 
+test('a share/image flow SPLIT across two files prints an advisory, not silence', () => {
+    // The same-file requirement stops a false positive (a PDF share does not
+    // touch the photo library). Its cost is a miss: a genuine share-image flow
+    // can live across two modules, and then the conjunction holds in no single
+    // file while the shipped payload as a whole still supports Save Image.
+    //
+    // Reporting that as "no shipped-bundle path matches" is true of the
+    // conjunction and reads as "nothing matched" -- a blind spot presented as a
+    // clean scan, which is the failure this whole tool exists against. It stays
+    // a pass (making it a violation would reinstate the false positive), but it
+    // has to be VISIBLE.
+    const ipa = makeIpa({
+        plist: BASE_PLIST,
+        web: {
+            'js/share.js': 'navigator.share({ files: [b] })',
+            'js/image.js': 'canvas.toBlob(b => b) // image/png',
+        },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{
+            ifBundleMatches: 'navigator\\.share|canShare',
+            andBundleMatches: 'image/png|toBlob',
+            requirePlistKey: 'NSPhotoLibraryAddUsageDescription',
+        }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+    // Fails against the old code, which emitted only the "no shipped-bundle
+    // path matches" pass line and nothing else.
+    assert.match(out, /note {2}capability NSPhotoLibraryAddUsageDescription/);
+    assert.match(out, /does not match in the SAME file/);
+    assert.match(out, /js\/share\.js/);
+});
+
 test('both patterns must hit the SAME file, not two unrelated modules', () => {
     const manifest = makeManifest({
         capabilityCoupling: [{

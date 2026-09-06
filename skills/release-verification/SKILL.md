@@ -184,6 +184,17 @@ without that, any future PDF share would be a false positive. Requiring the
 same file matters — a thumbnail helper in one module and an unrelated share in
 another are not one flow.
 
+**That narrowing buys a false-positive fix and costs a possible miss**, so the
+miss is reported rather than swallowed. A real share-image flow can legitimately
+be split across two modules, and then the conjunction holds in no single file
+while the shipped payload as a whole still supports Save Image. Printing only
+"no shipped-bundle path matches" would be true of the conjunction and would read
+as *nothing matched* — a blind spot presented as a clean scan. So when the
+primary pattern matches somewhere and the conjunction matches nowhere, the run
+emits a `note` naming the files, and says the rule could not see a split flow.
+It stays a pass: promoting it to a violation would reinstate the false positive
+the narrowing exists to remove.
+
 ### `renderedVersion` exists because of a false positive I shipped
 
 The first version of the iHEARtest manifest had

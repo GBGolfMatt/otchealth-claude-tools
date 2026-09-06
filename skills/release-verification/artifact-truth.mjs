@@ -300,6 +300,10 @@ const compiled = inspect(`validating rules in ${manifestPath}`, () => {
 const rx = (source) => compiled.get(source);
 const violations = [];
 const passes = [];
+// Advisories: things a reader should know that are NOT violations. They exist so
+// a known blind spot prints something rather than nothing; silence is how a gate
+// that verified less than it seems still looks clean.
+const notes = [];
 
 const art = inspect(`opening ${ipaPath}`, () => extract(ipaPath));
 
@@ -479,6 +483,22 @@ for (const rule of expect.capabilityCoupling || []) {
     .filter((f) => primary.test(f.text) && (!secondary || secondary.test(f.text)))
     .map((f) => f.rel);
   const pattern = secondary ? `/${rule.ifBundleMatches}/ AND /${rule.andBundleMatches}/` : `/${rule.ifBundleMatches}/`;
+  // THE SAME-FILE REQUIREMENT CAN MISS A REAL SPLIT FLOW, and silence is the
+  // wrong way to report that. `andBundleMatches` exists to stop a false positive
+  // (a PDF share does not touch the photo library), but a genuine share-image
+  // flow can legitimately live across two modules -- a thumbnail helper in one,
+  // the share call in another -- and the conjunction then holds in NO single
+  // file while the shipped payload as a whole still supports Save Image.
+  //
+  // Left alone, that prints "no shipped-bundle path matches", which is true of
+  // the conjunction and reads as "nothing matched". A blind spot the tool
+  // reports as a clean scan is the exact failure this whole file exists against.
+  // So when the primary matches SOMEWHERE and the conjunction matches NOWHERE,
+  // say so as an advisory. Not a violation: making it one would reinstate the
+  // false positive the narrowing was added to remove. Visible, not silent.
+  const splitCandidates = secondary && matched.length === 0
+    ? bundle.files.filter((f) => primary.test(f.text)).map((f) => f.rel)
+    : [];
   // "Declared" has to mean a USABLE purpose string, not merely a present key.
   // A usage description is the sentence iOS shows the user, and an empty or
   // non-string value is not one: `in` alone would report CLEAN for an artifact
@@ -521,6 +541,13 @@ for (const rule of expect.capabilityCoupling || []) {
   } else {
     passes.push(`capability ${rule.requirePlistKey}: no shipped-bundle path matches ${pattern}, and the key is undeclared`);
   }
+  if (splitCandidates.length) {
+    notes.push(
+      `capability ${rule.requirePlistKey}: /${rule.ifBundleMatches}/ matches ${splitCandidates.slice(0, 3).join(', ')} ` +
+      `but /${rule.andBundleMatches}/ does not match in the SAME file, so this rule did not fire. ` +
+      'If the flow is genuinely split across modules, this rule cannot see it -- check by hand.',
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +558,7 @@ const result = {
   version: `${plist.CFBundleShortVersionString} (${plist.CFBundleVersion})`,
   shippedBundleFiles: bundle.missing ? 0 : bundle.files.length,
   passes,
+  notes,
   violations,
   verdict: violations.length ? 'VIOLATIONS' : 'CLEAN',
 };
@@ -541,6 +569,7 @@ if (asJson) {
   console.log(`artifact-truth: ${result.app} ${result.version} ${result.bundleId}`);
   console.log(`shipped bundle: ${result.shippedBundleFiles} text files under ${(expect.webBundle && expect.webBundle.root) || '(app root)'}`);
   for (const p of passes) console.log(`  ok    ${p}`);
+  for (const n of notes) console.log(`  note  ${n}`);
   for (const v of violations) console.log(`  FAIL  [${v.rule}] ${v.detail}\n        why: ${v.why}`);
   console.log(result.violations.length ? `\nVERDICT: ${violations.length} violation(s)` : '\nVERDICT: CLEAN');
 }
