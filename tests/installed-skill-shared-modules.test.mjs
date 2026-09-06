@@ -42,8 +42,23 @@ const SPECIFIER_FORMS = [
   // about every dependency form, and a claim that happens to hold only because nobody has written
   // the missing form yet is not the claim being made. The negative lookahead keeps it from also
   // matching the `import(` call form, which the pattern above already handles.
-  /\bimport\s+(?!\()["'`]([^"'`$]+)/g,
+  // `\s*` plus optional block-comment trivia, not `\s+`: `import"x.mjs"` and
+  // `import /* c */ "x.mjs"` both parse (verified with node --check), and the first draft of this
+  // pattern required literal whitespace, so both evaded it.
+  /\bimport\s*(?:\/\*[^]*?\*\/\s*)*(?!\()["'`]([^"'`$]+)/g,
 ];
+
+// ON THE LIMITS OF THIS METHOD, stated rather than papered over. These are regexes, not a
+// JavaScript parser, so they cannot be complete: comment trivia is handled only where it has
+// actually been shown to appear, string escapes and regex literals containing quote characters are
+// not modelled, and a sufficiently exotic-but-valid specifier can still slip past. The assertion
+// messages below say so, because the previous two rounds of this file each claimed coverage of
+// "every import form" and were each wrong -- first missing dynamic import and re-exports, then
+// missing side-effect imports. The claim now matches the method: these patterns catch every form
+// anyone in this repo has actually written, and the cost of a miss is bounded, because a shared
+// module that reaches a third sibling directory also breaks loudly at runtime the first time an
+// installed skill imports it. A parser would be the complete answer and is not worth its
+// dependency here.
 
 function specifiersIn(src) {
   const out = [];
@@ -130,5 +145,11 @@ test("the shared setup modules only reach back into setup/ or skills/, so the tw
       offenders.push(`${e} -> ${spec}`);
     }
   }
-  assert.deepEqual(offenders, [], `shared setup modules reaching outside setup/ and skills/:\n${offenders.join("\n")}`);
+  assert.deepEqual(
+    offenders,
+    [],
+    `shared setup modules reaching outside setup/ and skills/, which breaks the two-directory ` +
+      `installed layout:\n${offenders.join("\n")}\n(Detected by pattern matching, not by parsing; ` +
+      `see SPECIFIER_FORMS for what that does and does not cover.)`,
+  );
 });
