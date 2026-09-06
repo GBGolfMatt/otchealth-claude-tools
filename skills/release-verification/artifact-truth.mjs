@@ -88,6 +88,15 @@ function readPlist(file) {
   const buf = fs.readFileSync(file);
   if (buf.slice(0, 6).toString('latin1') === 'bplist') return parseBinaryPlist(buf);
   const text = buf.toString('utf8');
+  // Refuse input that is not a plist at all. The reader below is a regex over
+  // key/value pairs, so ANY text containing a matching
+  // <key>..</key><string>..</string> fragment would otherwise be accepted as a
+  // parsed plist -- a truncated or corrupt file could look inspected and pass
+  // the configured checks. This does not make the reader a validating parser,
+  // and it is not meant to: it is a floor that keeps obvious non-plists out.
+  if (!/<plist[\s>]/i.test(text) || !/<dict[\s>]/i.test(text)) {
+    throw new Error('Info.plist is not XML plist content (no <plist> / <dict> element) and does not start with the bplist00 magic');
+  }
   const out = {};
   // Minimal XML plist reader: enough for <key>/<string>/<true>/<false>, which
   // is all these expectations ever assert against.
@@ -195,6 +204,12 @@ function inspect(what, fn) {
   }
 }
 
+// An id is a literal, so escape it before it becomes part of a pattern.
+function escapeForRegExp(literal) {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+const RENDERED_VERSION_KEY = Symbol('renderedVersion');
+
 const manifest = inspect(`reading manifest ${manifestPath}`, () => JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
 const expect = manifest.expect || {};
 
@@ -239,8 +254,15 @@ const compiled = inspect(`validating rules in ${manifestPath}`, () => {
   for (const k of Object.keys(ip.equals || {})) {
     if (k === '') throw new Error('infoPlist.equals: keys must be non-empty strings');
   }
-  if (expect.renderedVersion && (typeof expect.renderedVersion.elementId !== 'string' || expect.renderedVersion.elementId === '')) {
-    throw new Error('renderedVersion.elementId must be a non-empty string');
+  if (expect.renderedVersion) {
+    const id = expect.renderedVersion.elementId;
+    if (typeof id !== 'string' || id === '') throw new Error('renderedVersion.elementId must be a non-empty string');
+    // Compile it HERE, and escape it. An elementId is an HTML id, not a
+    // pattern: interpolating it raw meant an id like `[` threw at RegExp
+    // construction outside inspect() (exit 1, claiming the artifact was at
+    // fault), and any id containing regex metacharacters could quietly match
+    // the wrong element.
+    patterns.set(RENDERED_VERSION_KEY, new RegExp(`<[^>]*\\bid\\s*=\\s*["']${escapeForRegExp(id)}["'][^>]*>([^<]*)<`));
   }
   return patterns;
 });
@@ -347,8 +369,7 @@ if (expect.renderedVersion) {
     // runtime by client-side rendering cannot be seen here and the rule should
     // not be declared for such an app.
     const id = expect.renderedVersion.elementId;
-    const re = new RegExp(`<[^>]*\\bid\\s*=\\s*["']${id}["'][^>]*>([^<]*)<`);
-    const m = idxFile.text.match(re);
+    const m = idxFile.text.match(compiled.get(RENDERED_VERSION_KEY));
     const rendered = m ? m[1].trim() : null;
     const want = `v${plist.CFBundleShortVersionString}`;
     if (rendered === want) passes.push(`rendered version tag "${rendered}" matches the binary`);
@@ -374,8 +395,23 @@ for (const rule of expect.capabilityCoupling || []) {
     .filter((f) => primary.test(f.text) && (!secondary || secondary.test(f.text)))
     .map((f) => f.rel);
   const pattern = secondary ? `/${rule.ifBundleMatches}/ AND /${rule.andBundleMatches}/` : `/${rule.ifBundleMatches}/`;
-  const declared = rule.requirePlistKey in plist;
-  if (reached.length && !declared) {
+  // "Declared" has to mean a USABLE purpose string, not merely a present key.
+  // A usage description is the sentence iOS shows the user, and an empty or
+  // non-string value is not one: `in` alone would report CLEAN for an artifact
+  // that still has no valid TCC disclosure, which is the very failure this rule
+  // exists to catch. Present-but-unusable gets its own message, because "does
+  // NOT declare" would send someone looking for a missing key that is right
+  // there.
+  const raw = Object.prototype.hasOwnProperty.call(plist, rule.requirePlistKey) ? plist[rule.requirePlistKey] : undefined;
+  const present = raw !== undefined;
+  const declared = typeof raw === 'string' && raw.trim() !== '';
+  if (present && !declared) {
+    violations.push({
+      rule: 'capabilityCoupling',
+      detail: `Info.plist has ${rule.requirePlistKey} but its value is not a usable purpose string (${JSON.stringify(raw)})`,
+      why: 'iOS shows this string in the permission prompt; an empty or non-string value is not a disclosure, and the shipped bundle ' + (reached.length ? `reaches ${pattern}` : 'may still reach it by a path this text scan cannot see'),
+    });
+  } else if (reached.length && !declared) {
     violations.push({
       rule: 'capabilityCoupling',
       detail: `shipped bundle reaches ${pattern} (${reached.slice(0, 3).join(', ')}) but Info.plist does NOT declare ${rule.requirePlistKey}`,

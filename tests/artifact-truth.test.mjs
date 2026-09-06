@@ -483,3 +483,108 @@ test('an infoPlist rule with no key exits 2 rather than matching undefined', () 
         assert.match(out, /key must be a non-empty string/);
     }
 });
+
+// --- "declared" must mean a usable purpose string ---------------------------
+// A usage description is the sentence iOS shows in the permission prompt. A
+// present-but-empty key is not a disclosure, and `requirePlistKey in plist`
+// counted it as one -- so an artifact with no valid TCC disclosure could report
+// CLEAN, which is the exact failure the rule exists to catch.
+
+const SHARE_RULE = {
+    ifBundleMatches: 'navigator\\.share',
+    requirePlistKey: 'NSPhotoLibraryAddUsageDescription',
+};
+const SHARE_WEB = { 'js/share.js': 'canvas.toBlob(b => navigator.share({ files: [b] }))' };
+
+test('an empty purpose string does not count as declared', () => {
+    const ipa = makeIpa({ plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: '' }, web: SHARE_WEB });
+    const manifest = makeManifest({ webBundle: { root: 'public' }, capabilityCoupling: [SHARE_RULE] });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /not a usable purpose string/);
+});
+
+test('a whitespace-only purpose string does not count as declared', () => {
+    const ipa = makeIpa({ plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: '   ' }, web: SHARE_WEB });
+    const manifest = makeManifest({ webBundle: { root: 'public' }, capabilityCoupling: [SHARE_RULE] });
+    assert.equal(run(ipa, manifest).code, 1);
+});
+
+test('a non-string purpose value does not count as declared', () => {
+    const ipa = makeIpa({ plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: true }, web: SHARE_WEB });
+    const manifest = makeManifest({ webBundle: { root: 'public' }, capabilityCoupling: [SHARE_RULE] });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /not a usable purpose string/);
+});
+
+test('present-but-unusable is reported differently from absent', () => {
+    // "does NOT declare" would send someone looking for a missing key that is
+    // sitting right there with a bad value.
+    const withEmpty = makeIpa({ plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: '' }, web: SHARE_WEB });
+    const absent = makeIpa({ plist: BASE_PLIST, web: SHARE_WEB });
+    const manifest = makeManifest({ webBundle: { root: 'public' }, capabilityCoupling: [SHARE_RULE] });
+    assert.match(run(withEmpty, manifest).out, /has NSPhotoLibraryAddUsageDescription but its value/);
+    assert.match(run(absent, manifest).out, /does NOT declare NSPhotoLibraryAddUsageDescription/);
+});
+
+test('a real purpose string still passes', () => {
+    const ipa = makeIpa({
+        plist: { ...BASE_PLIST, NSPhotoLibraryAddUsageDescription: 'Save your result card to Photos.' },
+        web: SHARE_WEB,
+    });
+    const manifest = makeManifest({ webBundle: { root: 'public' }, capabilityCoupling: [SHARE_RULE] });
+    assert.equal(run(ipa, manifest).code, 0);
+});
+
+// --- renderedVersion.elementId is a literal, not a pattern ------------------
+
+test('a regex metacharacter in elementId never crashes the run', () => {
+    // Before escaping, `[` threw at RegExp construction OUTSIDE inspect(), so
+    // Node exited 1 and the run blamed the artifact for what was really a
+    // broken verifier configuration.
+    //
+    // I first wrote this expecting exit 2, and that was wrong: once the id is
+    // escaped there is no throw to classify. An id is a literal, so `[` is a
+    // perfectly readable configuration naming an element that does not exist,
+    // and "no element with id" at exit 1 is the accurate answer. Exit 2 is for
+    // "I could not look", and here we looked.
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'index.html': '<span id="x">v1.2.3</span>' } });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        renderedVersion: { file: 'index.html', elementId: '[' },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /no element with id "\["/);
+    assert.doesNotMatch(out, /Invalid regular expression|SyntaxError/);
+});
+
+test('elementId is matched literally, so metacharacters cannot match a different element', () => {
+    // Unescaped, `a.c` would match id="abc". It must match only id="a.c".
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        renderedVersion: { file: 'index.html', elementId: 'a.c' },
+    });
+    const wrongElement = makeIpa({ plist: BASE_PLIST, web: { 'index.html': '<span id="abc">v1.2.3</span>' } });
+    const r = run(wrongElement, manifest);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /no element with id "a\.c"/);
+
+    const exact = makeIpa({ plist: BASE_PLIST, web: { 'index.html': '<span id="a.c">v1.2.3</span>' } });
+    assert.equal(run(exact, manifest).code, 0);
+});
+
+// --- the XML reader needs a floor -------------------------------------------
+
+test('text that merely contains a plist-shaped fragment is not accepted as a plist', () => {
+    // The reader is a regex over key/value pairs, so any text carrying a
+    // matching fragment would otherwise look like a successfully parsed plist
+    // and let the configured checks run against a corrupt file.
+    const ipa = makeIpa({
+        rawPlist: 'garbage garbage <key>CFBundleIdentifier</key><string>com.fixture.app</string> more garbage',
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /not XML plist content/);
+});
