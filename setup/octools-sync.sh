@@ -38,6 +38,14 @@ case "$TOOLS_DIR" in
               cp -R "$skdir" "${SKILLS_DST}/${sk}" 2>/dev/null || true
             done
           fi
+          # Keep the shared setup modules in step with the skills. skills/ and setup/ are siblings in
+          # the git tree, and thirteen skills import "../../setup/<mod>.mjs"; if only skills/ refreshes
+          # here, a skill that starts importing a NEW shared module mid-session breaks with
+          # ERR_MODULE_NOT_FOUND until the next fresh session. Same *.mjs-only rule as session-start.sh.
+          if [ -d "$TOOLS_DIR/setup" ]; then
+            mkdir -p "${HOME}/.claude/setup" 2>/dev/null || true
+            cp -f "$TOOLS_DIR/setup/"*.mjs "${HOME}/.claude/setup/" 2>/dev/null || true
+          fi
           # Re-wire user-scope hooks idempotently so a NEWLY-ADDED hook (e.g. kb-recall) reaches an
           # already-RUNNING session on its next refresh, not only on the next fresh session. Additive,
           # only writes when changed, always exits 0.
