@@ -18,33 +18,83 @@
 // failed, so the assertion is on the ~/.claude/setup path the runtime actually resolves to.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-// Every form that can create a module dependency, not just `import x from "..."`. An earlier draft
-// of this file matched only static `from "..."` specifiers, which silently ignored dynamic
-// `import(...)` and `export ... from` re-exports -- so a module could acquire a dependency on a
-// third sibling directory and these tests would still pass while the installed layout broke. That
-// is not hypothetical: setup/drift-recon.mjs and setup/image-drift.mjs already use dynamic
-// `await import("../skills/...")` today, and the first version of this test could not see them.
-// Backticks are included because a template literal with a static prefix
-// (`import(\`./model-routing.mjs?t=${x}\`)`, which setup/model-routing.test.mjs really does) is
-// still a real dependency on a real path; only the prefix before any ${ is meaningful.
-const SPECIFIER_FORMS = [
-  /\bfrom\s*["'`]([^"'`$]+)/g,          // import x from "..."  /  export x from "..."
+
+// A file V8 could not parse is a file whose dependencies were never checked. Surface it instead of
+// letting it count as "no dependencies found", which would read as a pass.
+function assertNoParseErrors(parsed) {
+  const bad = Object.entries(parsed)
+    .filter(([, v]) => v && !Array.isArray(v) && v.__parseError)
+    .map(([f, v]) => `${f}: ${v.__parseError}`);
+  assert.deepEqual(bad, [], `files that could not be parsed, so their imports went unchecked:\n${bad.join("\n")}`);
+}
+// HOW DEPENDENCIES ARE FOUND, and why it is not a pile of regexes.
+//
+// Three rounds of review on this file each found another import form the pattern list had missed:
+// dynamic import and re-exports, then side-effect-only `import "x.mjs"`, then block-comment trivia,
+// and a line-comment variant after that. Every one was a real, valid form. The lesson was not "add
+// another alternation" -- it was that pattern-matching JavaScript syntax has no natural stopping
+// point, and each round shipped a slightly-less-wrong claim of completeness.
+//
+// So STATIC imports are now parsed by V8 itself. `vm.SourceTextModule` compiles the source and
+// exposes `dependencySpecifiers`, the exact list of static specifiers, without executing anything.
+// That covers every static form -- `import x from`, bare `import "x"`, `export ... from`, and any
+// comment or whitespace trivia between the tokens -- because it is the same parser Node uses to
+// load the file. It needs --experimental-vm-modules, so it runs in a child process; no runner
+// change required.
+//
+// DYNAMIC `import(...)` and `require(...)` are still pattern-matched, because they are call
+// expressions whose argument is only known at runtime and so never appear in dependencySpecifiers.
+// This is the remaining, stated limit of the check: a dynamic specifier built from a variable, or
+// one written with comment trivia inside the call, is not seen. That floor is accepted rather than
+// papered over.
+const CALL_FORMS = [
   /\bimport\s*\(\s*["'`]([^"'`$]+)/g,   // await import("...")
   /\brequire\s*\(\s*["'`]([^"'`$]+)/g,  // require("...") in any CommonJS holdout
 ];
 
-function specifiersIn(src) {
-  const out = [];
-  for (const re of SPECIFIER_FORMS) for (const m of src.matchAll(re)) out.push(m[1]);
-  return out;
+const SHARED_PREFIX = "../../setup/";
+
+// One child process for every file, rather than one per file.
+function staticSpecifiersFor(files) {
+  const script = `
+    const vm = require("node:vm");
+    const { readFileSync } = require("node:fs");
+    const out = {};
+    for (const f of JSON.parse(process.argv[1])) {
+      try {
+        out[f] = new vm.SourceTextModule(readFileSync(f, "utf8")).dependencySpecifiers;
+      } catch (err) {
+        out[f] = { __parseError: String(err && err.message || err) };
+      }
+    }
+    process.stdout.write(JSON.stringify(out));
+  `;
+  const r = spawnSync(process.execPath, ["--experimental-vm-modules", "-e", script, JSON.stringify(files)], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  // Fail LOUDLY rather than falling back to the weaker regex path. A silent downgrade here would
+  // reproduce exactly the class of bug this whole file exists to catch: a check that keeps
+  // reporting success while quietly no longer checking the thing it claims to.
+  if (r.status !== 0 || !r.stdout) {
+    throw new Error(
+      `could not parse modules with vm.SourceTextModule (exit ${r.status}): ${r.stderr || "no output"}`,
+    );
+  }
+  return JSON.parse(r.stdout);
 }
 
-const SHARED_PREFIX = "../../setup/";
+function callSpecifiersIn(src) {
+  const out = [];
+  for (const re of CALL_FORMS) for (const m of src.matchAll(re)) out.push(m[1]);
+  return out;
+}
 
 function walk(dir) {
   const out = [];
@@ -59,9 +109,12 @@ function walk(dir) {
 
 function sharedModulesReferencedBySkills() {
   const refs = new Map(); // module -> [files]
-  for (const file of walk(join(ROOT, "skills"))) {
+  const files = walk(join(ROOT, "skills"));
+  const statics = staticSpecifiersFor(files);
+  assertNoParseErrors(statics);
+  for (const file of files) {
     const src = readFileSync(file, "utf8");
-    for (const spec of specifiersIn(src)) {
+    for (const spec of [...(statics[file] || []), ...callSpecifiersIn(src)]) {
       if (!spec.startsWith(SHARED_PREFIX)) continue;
       const mod = spec.slice(SHARED_PREFIX.length);
       if (!refs.has(mod)) refs.set(mod, []);
@@ -114,14 +167,27 @@ test("the shared setup modules only reach back into setup/ or skills/, so the tw
   // If a shared module ever imported a THIRD sibling directory, installing skills/ + setup/ would
   // stop being enough and this test should be the thing that says so.
   const offenders = [];
+  const setupFiles = readdirSync(join(ROOT, "setup"))
+    .filter((e) => e.endsWith(".mjs"))
+    .map((e) => join(ROOT, "setup", e));
+  const setupStatics = staticSpecifiersFor(setupFiles);
+  assertNoParseErrors(setupStatics);
   for (const e of readdirSync(join(ROOT, "setup"))) {
     if (!e.endsWith(".mjs")) continue;
-    const src = readFileSync(join(ROOT, "setup", e), "utf8");
-    for (const spec of specifiersIn(src)) {
+    const full = join(ROOT, "setup", e);
+    const src = readFileSync(full, "utf8");
+    for (const spec of [...(setupStatics[full] || []), ...callSpecifiersIn(src)]) {
       if (!spec.startsWith("./") && !spec.startsWith("../")) continue; // bare package specifier
       if (spec.startsWith("./") || spec.startsWith("../skills/")) continue;
       offenders.push(`${e} -> ${spec}`);
     }
   }
-  assert.deepEqual(offenders, [], `shared setup modules reaching outside setup/ and skills/:\n${offenders.join("\n")}`);
+  assert.deepEqual(
+    offenders,
+    [],
+    `shared setup modules reaching outside setup/ and skills/, which breaks the two-directory ` +
+      `installed layout:\n${offenders.join("\n")}\n(Static imports come from V8 via ` +
+      `vm.SourceTextModule and are complete. Dynamic import() and require() are pattern-matched, ` +
+      `so a specifier built from a variable is not seen; see CALL_FORMS.)`,
+  );
 });
