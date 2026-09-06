@@ -16,8 +16,8 @@ WHAT THIS IS NOT. A receipt says what happened once. It does not replace
 `tests/artifact-truth.test.mjs`, which runs in CI and pins what must KEEP being
 true. IPAs are ~220 MB and expire from GitHub Actions after 14 days, so they are
 not committed and cannot be linked; SOURCES.md is how you obtain the same ones.
-Tool commit: dee5c46
-Captured: 2026-09-06T22:07:22Z
+Tool commit: 67858ad
+Captured: 2026-09-06T22:34:44Z
 
 ## iheartest
 
@@ -31,8 +31,8 @@ shipped bundle: 161 text files under public
   ok    plist CFBundleIdentifier == com.innerscope.iheartest
   ok    bundle contains cioConsentGranted
   ok    rendered version tag "v1.6.0" matches the binary
-  ok    capability NSPhotoLibraryAddUsageDescription: reachable in bundle AND declared
-  ok    capability NSMicrophoneUsageDescription: reachable in bundle AND declared
+  ok    capability NSPhotoLibraryAddUsageDescription: shipped bundle matches /navigator\.share|canShare/ AND /image/png|image/jpeg|toBlob|toDataURL/ AND the key is declared
+  ok    capability NSMicrophoneUsageDescription: shipped bundle matches /getUserMedia|mediaDevices/ AND the key is declared
 
 VERDICT: CLEAN
 exit=0

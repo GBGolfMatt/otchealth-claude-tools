@@ -93,11 +93,38 @@ function readPlist(file) {
   // Refuse input that is not a plist at all. The reader below is a regex over
   // key/value pairs, so ANY text containing a matching
   // <key>..</key><string>..</string> fragment would otherwise be accepted as a
-  // parsed plist -- a truncated or corrupt file could look inspected and pass
-  // the configured checks. This does not make the reader a validating parser,
-  // and it is not meant to: it is a floor that keeps obvious non-plists out.
-  if (!/<plist[\s>]/i.test(text) || !/<dict[\s>]/i.test(text)) {
+  // parsed plist.
+  const openAt = text.search(/<plist[\s>]/i);
+  if (openAt < 0 || !/<dict[\s>]/i.test(text)) {
     throw new Error('Info.plist is not XML plist content (no <plist> / <dict> element) and does not start with the bplist00 magic');
+  }
+  // The shape check above is NOT sufficient, and an earlier version of this
+  // function said so in a comment and then shipped it anyway. A TRUNCATED plist
+  // -- the realistic corruption for a partially written file or a cut-off
+  // download -- keeps its opening tags and all of its early keys, so it sails
+  // through. Every key after the cut then reads as ABSENT.
+  //
+  // That is not just a missed exit 2. The coupling rules turn those phantom
+  // absences into confident VIOLATIONS: reproduced live, a plist truncated
+  // mid-`<key>NSMicroph` produced "shipped bundle textually matches
+  // /getUserMedia/ but Info.plist does NOT declare NSMicrophoneUsageDescription"
+  // -- a fabricated defect, in the tool's most quotable voice, about a key that
+  // may well exist past the cut. Exit 2 exists so "I could not read it" is never
+  // reported as a pass OR as a finding.
+  //
+  // So require the document to be TERMINATED and its tags BALANCED. This is
+  // still not a validating XML parser and does not claim to be one; it is a
+  // structural floor that catches truncation and gross mangling, which is the
+  // corruption that actually happens to a file on the way out of a build.
+  if (!/<\/plist\s*>/i.test(text.slice(openAt))) {
+    throw new Error('Info.plist has an opening <plist> but no closing </plist>: the document is truncated, so keys past the cut would read as absent and be reported as real violations');
+  }
+  const count = (re) => (text.match(re) || []).length;
+  // `<dict/>` self-closes, so [\s>] deliberately does not count it as an opener.
+  const dictOpen = count(/<dict[\s>]/gi), dictClose = count(/<\/dict\s*>/gi);
+  const keyOpen = count(/<key\s*>/gi), keyClose = count(/<\/key\s*>/gi);
+  if (dictOpen !== dictClose || keyOpen !== keyClose) {
+    throw new Error(`Info.plist tags do not balance (<dict> ${dictOpen}/${dictClose}, <key> ${keyOpen}/${keyClose}): the document is malformed, and a partially readable plist is not evidence about the keys it appears to lack`);
   }
   const out = {};
   // Minimal XML plist reader: enough for <key>/<string>/<true>/<false>, which

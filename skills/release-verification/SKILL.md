@@ -244,3 +244,12 @@ asserting the pair. `iheartest/qa/release-verification/` is the worked example.
   Flatstick), match on strings that survive minification, and verify by
   running the rule against a build known to contain the capability.
 - **Encrypted or unusual IPA layouts** exit 2 rather than guessing.
+- **The XML plist reader is a structural floor, not a validating parser.** It
+  requires the bplist magic, or an XML document that opens `<plist>`/`<dict>`,
+  *closes* `</plist>`, and has balanced `<dict>` and `<key>` tags — then reads
+  key/value pairs with a regex. That catches truncation and gross mangling,
+  which is the corruption that actually happens to a file on the way out of a
+  build. It would not catch every semantically invalid document. Anything it
+  rejects is exit 2, never a pass and never a violation: a plist the tool could
+  only partially read is not evidence about the keys it appears to lack, and an
+  earlier version turned exactly that into a confident fabricated finding.

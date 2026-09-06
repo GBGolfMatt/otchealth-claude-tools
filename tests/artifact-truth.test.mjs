@@ -628,6 +628,94 @@ test('text that merely contains a plist-shaped fragment is not accepted as a pli
     assert.match(out, /not XML plist content/);
 });
 
+// --- a truncated XML plist is unreadable, not evidence ----------------------
+// The <plist>/<dict> shape check above is NOT enough, and the function's own
+// comment said so before the guard was written to match. A truncated document
+// keeps its opening tags and its early keys, so it passed the floor and every
+// key past the cut read as absent.
+//
+// Two distinct wrong outcomes fall out of that, and the second is the nastier:
+// a false CLEAN when the configured keys happen to precede the cut, and a
+// FABRICATED VIOLATION when they follow it. Exit 2 exists so that "I could not
+// read it" is never reported as a pass and never as a finding.
+
+const TRUNC_HEAD = '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.fixture.app</string>\n';
+
+test('a truncated plist whose configured keys precede the cut exits 2, not CLEAN', () => {
+    const ipa = makeIpa({
+        rawPlist: `${TRUNC_HEAD}\t<key>NSPhotoLibraryAddUsageDescription</key>\n\t<string>Save your card.</string>\n\t<key>UILaunchStoryboard`,
+        web: { 'js/share.js': 'if (navigator.share) { shareCard(); }' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /truncated/);
+});
+
+test('a truncated plist NEVER fabricates a violation about a key past the cut', () => {
+    // Reproduced against the old code before this was fixed: the mic key sits
+    // past the cut, so it read as absent and the coupling rule announced
+    // "Info.plist does NOT declare NSMicrophoneUsageDescription" -- a confident,
+    // quotable accusation about a key the tool never actually looked at.
+    const ipa = makeIpa({
+        rawPlist: `${TRUNC_HEAD}\t<key>NSMicroph`,
+        web: { 'js/mic.js': 'navigator.mediaDevices.getUserMedia({ audio: true })' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.doesNotMatch(out, /does NOT declare/, 'reported a phantom missing key from an unreadable plist');
+});
+
+test('unbalanced tags mid-document exit 2 even when the closing </plist> is present', () => {
+    // Truncation is not the only corruption; a mangled middle leaves the
+    // document terminated but incoherent.
+    //
+    // The first fixture I wrote here was not actually unbalanced -- an extra
+    // <dict> plus an extra </dict> cancel out -- so the test failed and the
+    // tool was right. Keeping the note because "I wrote a bad fixture" and "the
+    // guard does not work" produce the identical red, and only one of them is a
+    // reason to change the code. This one drops a </key> instead.
+    const ipa = makeIpa({
+        rawPlist: `${TRUNC_HEAD}\t<key>NSPhotoLibraryAddUsageDescription\n\t<string>x</string>\n</dict>\n</plist>\n`,
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /do not balance/);
+});
+
+test('a realistic nested plist with arrays and a self-closing <dict\/> still parses', () => {
+    // The false-positive guard for the two checks above. Real Info.plists nest
+    // dicts inside arrays (CFBundleURLTypes) and carry empty self-closing dicts
+    // (UISceneConfigurations); a balance check that trips on those would fail
+    // every real artifact, which is a worse failure than the one being fixed.
+    const ipa = makeIpa({
+        rawPlist: [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+            '<plist version="1.0">', '<dict>',
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+            '\t<key>ITSAppUsesNonExemptEncryption</key><false/>',
+            '\t<key>CFBundleURLTypes</key><array><dict>',
+            '\t\t<key>CFBundleURLName</key><string>com.fixture.app</string>',
+            '\t\t<key>CFBundleURLSchemes</key><array><string>fixture</string></array>',
+            '\t</dict></array>',
+            '\t<key>UIApplicationSceneManifest</key><dict>',
+            '\t\t<key>UISceneConfigurations</key><dict/>',
+            '\t</dict>',
+            '</dict>', '</plist>', '',
+        ].join('\n'),
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 0, out);
+});
+
 // --- zero scanned files is fatal whenever any rule reads the bundle ---------
 // The first version of this guard read `if (wantedRoot && files.length === 0)`,
 // so a manifest with capabilityCoupling and no webBundle.root fell straight
