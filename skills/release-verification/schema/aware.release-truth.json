@@ -1,0 +1,31 @@
+{
+  "app": "aware",
+  "note": "AWARE has TWO web trees and only one ships. The repo's www/ is the legacy/dev tree and contains getUserMedia in modules reachable from visible buttons; the PUBLIC build assembles a different bundle that contains none of it. Reading www/ produced a false P0 on 2026-09-06. These expectations are checked against the SHIPPED IPA only.",
+  "expect": {
+    "infoPlist": {
+      "equals": { "CFBundleIdentifier": "com.innerscope.aware" }
+    },
+    "webBundle": {
+      "root": "public",
+      "mustNotContain": [
+        {
+          "pattern": "getUserMedia",
+          "why": "Release contract section 5 excludes numeric phone-microphone sound-level claims and live microphone-to-speaker simulation. The build enforces this by assembling a bundle without them; this asserts the enforcement actually happened rather than trusting the contract text."
+        }
+      ]
+    },
+    "capabilityCoupling": [
+      {
+        "ifBundleMatches": "getUserMedia|mediaDevices",
+        "requirePlistKey": "NSMicrophoneUsageDescription",
+        "forbidIfUnreachable": true,
+        "why": "Two-way rule. If the shipped bundle can reach the microphone the key must be declared or iOS kills the app; if it cannot, declaring the key over-claims a permission the app never uses and invites App Review questions. The ios-depot workflow asserts this key is ABSENT, and this proves that assertion is correct rather than merely asserted."
+      },
+      {
+        "ifBundleMatches": "navigator\\.share|canShare",
+        "requirePlistKey": "NSPhotoLibraryAddUsageDescription",
+        "why": "Same TCC class that crashed iHEARtest builds 53 to 58. AWARE shares PDFs, which offer Save to Files rather than Save Image, so this may be correctly undeclared; the rule decides from the artifact rather than from that assumption."
+      }
+    ]
+  }
+}

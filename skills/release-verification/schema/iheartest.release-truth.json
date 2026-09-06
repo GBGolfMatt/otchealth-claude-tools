@@ -1,0 +1,45 @@
+{
+  "app": "iheartest",
+  "note": "Expectations checked against the SHIPPED IPA, never the repo tree. See SKILL.md for why that distinction is the whole point of this file.",
+  "expect": {
+    "infoPlist": {
+      "equals": {
+        "CFBundleIdentifier": "com.innerscope.iheartest"
+      },
+      "forbidden": [
+        {
+          "key": "NSPhotoLibraryUsageDescription",
+          "why": "Add-only is the correct scope. The app never reads or picks from the photo library, and over-declaring a read permission invites App Review questions and misleads the user."
+        }
+      ]
+    },
+    "webBundle": {
+      "root": "public",
+      "mustContain": [
+        {
+          "pattern": "cioConsentGranted",
+          "why": "The Customer.io relay must ship behind its fail-closed consent gate. Build 58 shipped the relay WITHOUT this and sent install telemetry while Settings said Off."
+        }
+      ],
+      "mustNotContain": []
+    },
+    "capabilityCoupling": [
+      {
+        "ifBundleMatches": "navigator\\.share|canShare",
+        "requirePlistKey": "NSPhotoLibraryAddUsageDescription",
+        "why": "The share card hands an image to the iOS share sheet; the user choosing Save Image writes to the photo library on the app's behalf. Without the key iOS terminates the process under TCC (bug_type 309). This shipped undetected in builds 53, 56, 57 and 58. Apple's binary scanner cannot catch it because the app links no PhotoKit."
+      },
+      {
+        "ifBundleMatches": "getUserMedia|mediaDevices",
+        "requirePlistKey": "NSMicrophoneUsageDescription",
+        "forbidIfUnreachable": false,
+        "why": "Any reachable microphone path must be declared or iOS kills the app under TCC."
+      }
+    ],
+    "renderedVersion": {
+      "file": "index.html",
+      "elementId": "app-version-tag",
+      "why": "Packet item 14. Also the release string every error report is grouped under."
+    }
+  }
+}
