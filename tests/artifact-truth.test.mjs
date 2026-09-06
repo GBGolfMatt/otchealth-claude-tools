@@ -631,3 +631,34 @@ test('a plist-only manifest still passes with no scanned files', () => {
     const { code, out } = run(ipa, manifest);
     assert.equal(code, 0, out);
 });
+
+// --- the documented example must actually be usable -------------------------
+
+test('the manifest example in SKILL.md is valid JSON and the tool accepts it', () => {
+    // The published example carried a literal newline inside a string value, so
+    // anyone who copied it got exit 2 from this very tool. A copyable example
+    // that does not parse is worse than no example: it teaches the reader that
+    // the tool is broken.
+    const md = fs.readFileSync(path.join(ROOT, 'skills/release-verification/SKILL.md'), 'utf8');
+    const block = md.match(/```jsonc\n([\s\S]*?)```/);
+    assert.ok(block, 'SKILL.md no longer contains a jsonc manifest example');
+
+    // Strip // comments the way a jsonc reader would, then require real JSON.
+    const stripped = block[1].replace(/^\s*\/\/.*$/gm, '').replace(/\s+\/\/.*$/gm, '');
+    const parsed = JSON.parse(stripped);
+
+    // Parsing is necessary but not sufficient: run it as a real manifest so the
+    // example is proven usable, not merely well-formed.
+    const manifestFile = path.join(tmp('doc-example'), 'm.json');
+    fs.writeFileSync(manifestFile, JSON.stringify(parsed));
+    const ipa = makeIpa({
+        plist: { ...BASE_PLIST, CFBundleIdentifier: 'com.innerscope.iheartest', NSPhotoLibraryAddUsageDescription: 'Save your card.', NSMicrophoneUsageDescription: 'Speech check.' },
+        web: {
+            'index.html': '<span id="app-version-tag">v1.2.3</span>',
+            'js/app.js': 'cioConsentGranted(); canvas.toBlob(b => navigator.share({ files: [b] }));',
+            'js/mic.js': 'navigator.mediaDevices.getUserMedia({ audio: true })',
+        },
+    });
+    const { code, out } = run(ipa, manifestFile);
+    assert.notEqual(code, 2, `the documented example is not a usable manifest: ${out}`);
+});

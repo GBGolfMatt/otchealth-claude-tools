@@ -31,36 +31,15 @@ lesson trustworthy rather than a rule of thumb:
   behalf. `Info.plist` declared no `NSPhotoLibraryAddUsageDescription`, so iOS
   killed the process under TCC.
 
-  The count is enumerated rather than recalled, because every narrative version
-  of it, mine included, was an undercount. The query is a conjunction — the
-  share-image path REACHABLE in the shipped web source *and* the key absent —
-  since a build missing the key is only vulnerable if the path exists. Run in
-  the iheartest repo:
+  The count is derived, not recalled: **16 tagged builds** — 42, 43, and 45
+  through 58, which is every tagged build the repo has until 59 fixed it. The
+  query and its verbatim output live in
+  `receipts/INCIDENT-SCOPE.md`, along with the two caveats (there is no `+44`
+  tag, and "tagged" is not "reached testers"). It is recorded there rather than
+  restated here so the number has one home instead of two that can drift.
 
-  ```bash
-  for t in $(git tag -l 'tf/*' | sort -t+ -k2 -n); do
-    key=$(git show "$t:ios/App/App/Info.plist"  2>/dev/null | grep -c NSPhotoLibraryAddUsageDescription)
-    share=$(git show "$t:www/js/app.js" 2>/dev/null | grep -cE 'navigator\.share|canShare')
-    image=$(git show "$t:www/js/app.js" 2>/dev/null | grep -cE 'toBlob|image/png')
-    [ "${share:-0}" -gt 0 ] && [ "${image:-0}" -gt 0 ] && [ "${key:-1}" -eq 0 ] && echo "$t"
-  done
-  ```
-
-  Output, verbatim, 16 tags:
-
-  ```
-  tf/1.5.14+42  tf/1.5.15+43  tf/1.5.17+45  tf/1.5.18+46
-  tf/1.5.19+47  tf/1.5.19+48  tf/1.5.20+49  tf/1.5.21+50
-  tf/1.5.21+51  tf/1.6.0+52   tf/1.6.0+53   tf/1.6.0+54
-  tf/1.6.0+55   tf/1.6.0+56   tf/1.6.0+57   tf/1.6.0+58
-  ```
-
-  `tf/1.5.14+42` is the earliest tag the repo has, so this is every tagged build
-  in its history until 59 fixed it. Two caveats worth stating rather than
-  glossing: there is no `+44` tag, and "tagged" is not the same as "reached
-  testers" — the repo's convention tags every TestFlight build, but at least one
-  build (an earlier 59 attempt) never reached App Store Connect. The claim is
-  about tags, which is what the evidence supports.
+  Every narrative version of this count was an undercount, each inheriting the
+  last, which is why it is a committed query now rather than a sentence.
 
   Apple's own binary scanner cannot
   see it, because that scanner does static API-surface analysis and the app
@@ -135,8 +114,7 @@ families, all optional:
     "infoPlist": {
       "equals":    { "CFBundleIdentifier": "com.innerscope.iheartest" },
       "forbidden": [{ "key": "NSPhotoLibraryUsageDescription",
-                      "why": "add-only is the correct scope; over-declaring a read
-                              permission invites App Review questions" }]
+                      "why": "add-only is the correct scope; over-declaring a read permission invites App Review questions" }]
     },
     "webBundle": {
       "root": "public",                    // where Capacitor puts the web layer
