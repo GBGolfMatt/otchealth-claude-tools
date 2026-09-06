@@ -26,9 +26,17 @@
 // hand-written list of "this app needs that key", DERIVE the requirement from
 // what the shipped bundle actually does. If the shipped web layer can reach a
 // privacy-sensitive API, the shipped Info.plist must declare it. That single
-// rule catches iHEARtest's crash automatically AND certifies AWARE's absent
-// key as correct rather than suspicious -- the same rule, opposite verdicts,
-// no per-app special-casing.
+// rule catches iHEARtest's crash automatically AND clears AWARE's absent key
+// rather than leaving it suspicious -- the same rule, opposite verdicts, no
+// per-app special-casing.
+//
+// SCOPE, stated plainly because the rule is easy to over-trust: this is a TEXT
+// SCAN of the shipped web layer. A literal match in a comment, a string, or
+// dead code counts as "reachable", and a dynamically built or heavily minified
+// reference can be missed. So a violation is a strong signal worth blocking on,
+// while a pass means "no shipped-bundle path matches these patterns", NOT "this
+// app provably cannot reach that API". Native-only reach is invisible here by
+// construction; the plist rules and a real-device run cover that.
 //
 // Usage:
 //   node artifact-truth.mjs --ipa <path/to/App.ipa> --manifest <app.release-truth.json> [--json]
@@ -170,22 +178,55 @@ function readShippedText(appDir, subdir) {
 }
 
 // ---------------------------------------------------------------------------
-const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+// EXIT 2 IS THE WHOLE CONTRACT. Every step that merely *inspects* -- reading
+// the manifest, unzipping, parsing Info.plist, walking the shipped bundle --
+// must land on exit 2, never on exit 1. Exit 1 means "I looked and found a
+// violation"; letting an unreadable plist or a malformed manifest fall through
+// as a generic nonzero would say the artifact is bad when the truth is that we
+// never managed to look at it. Those are different facts and a release gate has
+// to keep them apart.
+function inspect(what, fn) {
+  try {
+    return fn();
+  } catch (e) {
+    console.error(`ARTIFACT UNREADABLE: ${what}: ${e && e.message}`);
+    console.error('Failing with exit 2. Being unable to inspect is never reported as clean, and never as a violation either.');
+    process.exit(2);
+  }
+}
+
+const manifest = inspect(`reading manifest ${manifestPath}`, () => JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
 const expect = manifest.expect || {};
 const violations = [];
 const passes = [];
 
-let art;
-try {
-  art = extract(ipaPath);
-} catch (e) {
-  console.error(`ARTIFACT UNREADABLE: ${e.message}`);
-  console.error('Failing with exit 2. An artifact we cannot open is never reported as clean.');
-  process.exit(2);
-}
+const art = inspect(`opening ${ipaPath}`, () => extract(ipaPath));
 
-const plist = readPlist(path.join(art.appDir, 'Info.plist'));
-const bundle = readShippedText(art.appDir, expect.webBundle && expect.webBundle.root);
+const plist = inspect('parsing Info.plist', () => {
+  const parsed = readPlist(path.join(art.appDir, 'Info.plist'));
+  // A binary-plist reader that silently returns a non-object would make every
+  // plist rule vacuously pass, so refuse rather than continue.
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Info.plist did not parse to a dictionary');
+  }
+  return parsed;
+});
+
+const wantedRoot = expect.webBundle && expect.webBundle.root;
+const bundle = inspect('reading the shipped web bundle', () => {
+  const b = readShippedText(art.appDir, wantedRoot);
+  // A typo in `root` used to set missing:true, which made every webBundle and
+  // capabilityCoupling rule skip and the run print VERDICT: CLEAN. That is the
+  // central mechanism silently disabling itself, which is the exact failure
+  // this tool exists to make impossible.
+  if (b.missing) {
+    throw new Error(`webBundle.root "${wantedRoot}" does not exist inside the shipped .app (is it "public"?)`);
+  }
+  if (wantedRoot && b.files.length === 0) {
+    throw new Error(`webBundle.root "${wantedRoot}" contains no readable text files -- every bundle rule would pass vacuously`);
+  }
+  return b;
+});
 
 // --- 1. Info.plist expectations -------------------------------------------
 for (const r of (expect.infoPlist && expect.infoPlist.required) || []) {
@@ -247,28 +288,43 @@ if (expect.renderedVersion) {
 // --- 3. Capability coupling: the rule that generalizes ---------------------
 // If the SHIPPED bundle can reach a privacy-sensitive API, the SHIPPED
 // Info.plist must declare it. Derived, not hand-maintained -- which is why it
-// flags iHEARtest's missing photo key and simultaneously certifies AWARE's
+// flags iHEARtest's missing photo key and simultaneously clears AWARE's
 // absent microphone key as correct.
 for (const rule of expect.capabilityCoupling || []) {
-  if (bundle.missing) continue;
-  const reached = bundle.files.filter((f) => new RegExp(rule.ifBundleMatches).test(f.text)).map((f) => f.rel);
+  // `andBundleMatches` narrows a rule to files matching BOTH patterns. Needed
+  // because a share call alone does not imply a photo-library write: sharing a
+  // PDF offers Save to Files, sharing a PNG offers Save Image, and only the
+  // second reaches the library. Both patterns must hit the SAME file, since two
+  // unrelated modules happening to mention each is not evidence of one flow.
+  const primary = new RegExp(rule.ifBundleMatches);
+  const secondary = rule.andBundleMatches ? new RegExp(rule.andBundleMatches) : null;
+  const reached = bundle.files
+    .filter((f) => primary.test(f.text) && (!secondary || secondary.test(f.text)))
+    .map((f) => f.rel);
+  const pattern = secondary ? `/${rule.ifBundleMatches}/ AND /${rule.andBundleMatches}/` : `/${rule.ifBundleMatches}/`;
   const declared = rule.requirePlistKey in plist;
   if (reached.length && !declared) {
     violations.push({
       rule: 'capabilityCoupling',
-      detail: `shipped bundle reaches /${rule.ifBundleMatches}/ (${reached.slice(0, 3).join(', ')}) but Info.plist does NOT declare ${rule.requirePlistKey}`,
+      detail: `shipped bundle reaches ${pattern} (${reached.slice(0, 3).join(', ')}) but Info.plist does NOT declare ${rule.requirePlistKey}`,
       why: rule.why || 'iOS terminates the process under TCC when an undeclared privacy-sensitive API is reached',
     });
   } else if (reached.length && declared) {
     passes.push(`capability ${rule.requirePlistKey}: reachable in bundle AND declared`);
-  } else if (!reached.length && declared && rule.forbidIfUnreachable) {
+  } else if (declared && rule.forbidIfUnreachable) {
     violations.push({
       rule: 'capabilityCoupling',
-      detail: `Info.plist declares ${rule.requirePlistKey} but nothing in the shipped bundle reaches /${rule.ifBundleMatches}/`,
+      detail: `Info.plist declares ${rule.requirePlistKey} but nothing in the shipped bundle reaches ${pattern}`,
       why: 'over-declaring a permission invites App Review questions and misleads users',
     });
-  } else if (!reached.length) {
-    passes.push(`capability ${rule.requirePlistKey}: unreachable in bundle, correctly undeclared`);
+  } else if (declared) {
+    // Unreachable but declared, with over-declaring tolerated for this rule.
+    // This used to print "correctly undeclared", which was simply false: the
+    // key IS declared. A report that misstates what it found is worse than no
+    // report, because it is quotable.
+    passes.push(`capability ${rule.requirePlistKey}: declared, and no shipped-bundle path matches ${pattern} (tolerated: this rule does not set forbidIfUnreachable, so a native-only path may justify it)`);
+  } else {
+    passes.push(`capability ${rule.requirePlistKey}: no shipped-bundle path matches ${pattern}, and the key is undeclared`);
   }
 }
 

@@ -3,7 +3,9 @@
   "note": "AWARE has TWO web trees and only one ships. The repo's www/ is the legacy/dev tree and contains getUserMedia in modules reachable from visible buttons; the PUBLIC build assembles a different bundle that contains none of it. Reading www/ produced a false P0 on 2026-09-06. These expectations are checked against the SHIPPED IPA only.",
   "expect": {
     "infoPlist": {
-      "equals": { "CFBundleIdentifier": "com.innerscope.aware" }
+      "equals": {
+        "CFBundleIdentifier": "com.innerscope.aware"
+      }
     },
     "webBundle": {
       "root": "public",
@@ -24,7 +26,8 @@
       {
         "ifBundleMatches": "navigator\\.share|canShare",
         "requirePlistKey": "NSPhotoLibraryAddUsageDescription",
-        "why": "Same TCC class that crashed iHEARtest builds 53 to 58. AWARE shares PDFs, which offer Save to Files rather than Save Image, so this may be correctly undeclared; the rule decides from the artifact rather than from that assumption."
+        "why": "Same TCC class that crashed iHEARtest builds 53 to 58, but narrowed. A bare share call is not evidence of a photo-library write: sharing a PDF offers Save to Files and never touches the library, while sharing a PNG offers Save Image and does. AWARE shares PDFs, so requiring the photo-add key on any navigator.share would be a false positive. Both patterns must hit the SAME file, so a thumbnail helper elsewhere in the bundle cannot combine with an unrelated share call to trip it.",
+        "andBundleMatches": "image/png|image/jpeg|toBlob|toDataURL"
       }
     ]
   }

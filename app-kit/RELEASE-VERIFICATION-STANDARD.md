@@ -106,10 +106,16 @@ Two rules that both came out of real defects:
    393x852, and 390x844 — and the gate underpinning most packet items is not
    the one the reviewer holds. Pin one constant, import it everywhere.
 
-### Stage 3 — Artifact truth (the new mandatory gate)
+### Stage 3 — Artifact truth
 
 `skills/release-verification/artifact-truth.mjs`, run against the **downloaded
 shipped IPA**, before the TestFlight upload.
+
+**Status, stated honestly: this runs by hand today and is not yet wired into any
+app's workflow.** It is meant to be a blocking gate and it is not one yet.
+Calling it mandatory before it is enforced would be the same overclaim this
+standard exists to stop, so: wiring it into each app's iOS workflow is the open
+adoption step, tracked per app in the checklist at the end.
 
 This is the stage the factory did not have. `grep -rl "Payload/" skills/`
 returned nothing before 2026-09-06: no tool in the toolkit had ever opened a
@@ -120,8 +126,15 @@ the shipped bundle can actually reach, rather than maintaining a per-app list.
 
 Proven both directions before adoption: run against iHEARtest Build 58 it
 caught all three known real defects; against Build 59 clean; against AWARE
-clean, with the absent microphone key **certified as correct** rather than
-merely unflagged.
+clean, with the absent microphone key **cleared** rather than merely unflagged.
+A committed test suite builds synthetic known-bad IPAs and pins the whole
+truth table plus the exit-code contract, so that proof is repeatable by anyone
+rather than resting on artifacts that happened to be on one machine.
+
+It is a text scan, so read its verdicts at their real strength: a violation is
+a strong signal worth blocking on; a pass means no shipped-bundle path matches
+those patterns, not that the app cannot reach the API. Native-only reach is
+invisible to it by construction.
 
 ### Stage 4 — Deterministic real device
 
@@ -263,7 +276,9 @@ only happens when someone thinks to run it is not a gate.
    `cap sync` copy into the bundle, and does any script transform it first?*
    For a two-tree app, name both trees and which one ships.
 3. Pin one device-viewport constant; import it in every browser gate.
-4. Wire artifact-truth into the iOS workflow after archive, before upload.
+4. Wire artifact-truth into the iOS workflow after archive, before upload. It is
+   NOT wired anywhere yet, so this is a real step, not a formality; until it is
+   done the app's stage 3 is a manual habit rather than a gate.
 5. Pin the Device Farm fuzz seed.
 6. Classify the first packet A/B/C. Count the B items. That number is the
    app's verification debt, and it is the backlog Codex works through.

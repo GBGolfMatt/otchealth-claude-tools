@@ -41,9 +41,16 @@ lesson trustworthy rather than a rule of thumb:
 One rule resolves both: **if the shipped bundle can reach a privacy-sensitive
 API, the shipped Info.plist must declare it.** Derive the requirement from the
 artifact instead of maintaining a per-app list of expected keys. That single
-rule flags iHEARtest's missing key *and* certifies AWARE's absent key as
-correct. Opposite verdicts, no special-casing, and it stays right when an app
-changes.
+rule flags iHEARtest's missing key *and* clears AWARE's absent key. Opposite
+verdicts, no special-casing, and it stays right when an app changes.
+
+Read the verdicts at their real strength. This is a text scan, so a violation
+is a strong signal worth blocking on, while a pass means *no shipped-bundle
+path matches these patterns*, not *this app cannot reach that API*. A literal
+match in a comment or dead code counts as reachable; a dynamically built or
+minified reference can be missed; native-only reach is invisible here by
+construction. The tool's own output is worded that way on purpose, so a line
+lifted out of it into a reviewer packet stays true.
 
 ## Running it
 
@@ -122,13 +129,22 @@ families, all optional:
 |---|---|---|
 | yes | no  | **VIOLATION** — the TCC kill |
 | yes | yes | pass, "reachable AND declared" |
-| no  | no  | pass, "unreachable, correctly undeclared" (this is AWARE) |
-| no  | yes | violation **only if** `forbidIfUnreachable: true` |
+| no  | no  | pass, "no shipped-bundle path matches, and the key is undeclared" (this is AWARE) |
+| no  | yes | violation **only if** `forbidIfUnreachable: true`, otherwise a pass that says the key *is* declared and tolerated |
 
 Set `forbidIfUnreachable` when over-declaring is itself a problem (App Review
 scrutiny, misleading permission prompts). Leave it off where a key is
 legitimately there for a native path the web bundle cannot see — which is why
 it is per-rule rather than global.
+
+**`andBundleMatches` narrows a rule to files matching BOTH patterns**, and both
+must hit the *same* file. It exists because a share call alone does not imply a
+photo-library write: sharing a PDF offers Save to Files and never touches the
+library, sharing a PNG offers Save Image and does. AWARE shares PDFs, so its
+photo rule pairs `navigator\.share|canShare` with `image/png|toBlob|...`;
+without that, any future PDF share would be a false positive. Requiring the
+same file matters — a thumbnail helper in one module and an unrelated share in
+another are not one flow.
 
 ### `renderedVersion` exists because of a false positive I shipped
 
@@ -162,12 +178,17 @@ artifact check.
    "correctly undeclared" certification, which is the output you want when a
    reviewer asks "are we sure the mic is not in there".
 
-## Where it belongs in CI
+## Where it belongs in CI, and where it actually runs today
 
-Run it after the archive step and **before** the TestFlight upload, so a
-violation stops the build rather than annotating one already in review. It
-needs only the IPA and `unzip`, so it can also run on a Linux runner against a
-downloaded artifact — which is how it runs today from the CTO seat.
+**Not yet wired into any app's workflow.** Today it is run by hand from the CTO
+seat against a downloaded artifact before hand-off. Saying otherwise would make
+this document guilty of the exact thing the tool exists to catch: describing a
+gate that does not gate.
+
+Wiring it is per-app and it is the next step. It belongs after the archive step
+and **before** the TestFlight upload, so a violation stops the build rather than
+annotating one already in review. It needs only the IPA, `node`, and `unzip`, so
+it runs fine on the Linux side of a workflow against the built artifact.
 
 ## Known limits (state these, do not paper over them)
 
