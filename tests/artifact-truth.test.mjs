@@ -778,6 +778,67 @@ test('a realistic nested plist with arrays and a self-closing <dict\/> still par
 // guard written to stop exactly that. Condition the check on what the RULES
 // need, never on what the manifest happened to mention.
 
+// --- the artifact boundary ------------------------------------------------
+// Every verdict this tool prints is only worth something if the bytes behind it
+// came out of the .app that shipped. webBundle.root is manifest-supplied, and
+// an unchecked path join lets it leave that boundary.
+
+test('a webBundle.root with ".." cannot escape the shipped .app', () => {
+    // Reproduced against the old code: root "../../" scanned the extraction
+    // parent and printed VERDICT: CLEAN, exit 0, over files that were never in
+    // the app. The same escape could manufacture a finding just as easily.
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/app.js': 'renderToday();' } });
+    const manifest = makeManifest({
+        webBundle: { root: '../../' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /\.\.".{0,40}segment|outside the shipped \.app/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('a nested ".." inside an otherwise normal root is refused too', () => {
+    // Rejected structurally by SEGMENT, not by a prefix test, so a "..' buried
+    // mid-path is caught rather than only a leading one.
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/app.js': 'renderToday();' } });
+    const manifest = makeManifest({
+        webBundle: { root: 'public/../../..' },
+        renderedVersion: { file: 'index.html', elementId: 'app-version-tag' },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('an absolute webBundle.root is refused', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/app.js': 'renderToday();' } });
+    const manifest = makeManifest({
+        webBundle: { root: '/etc' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /absolute path/);
+});
+
+test('a legitimate nested root inside the .app still works', () => {
+    // The false-positive guard: the boundary check must not break a real
+    // manifest that points at a subdirectory deeper than one level.
+    const ipa = makeIpa({
+        plist: BASE_PLIST,
+        web: { 'app.js': 'navigator.share({})' },
+        webRoot: 'public/assets',
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public/assets' },
+        capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);   // matched, key absent -> the normal violation
+    assert.match(out, /does NOT declare NSPhotoLibraryAddUsageDescription/);
+});
+
 test('capabilityCoupling with no webBundle.root is refused outright', () => {
     // Now a contract violation in its own right, not merely a vacuous-pass risk.
     // Without a root the scan walked the entire .app, and an .app carries

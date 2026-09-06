@@ -16,8 +16,8 @@ WHAT THIS IS NOT. A receipt says what happened once. It does not replace
 `tests/artifact-truth.test.mjs`, which runs in CI and pins what must KEEP being
 true. IPAs are ~220 MB and expire from GitHub Actions after 14 days, so they are
 not committed and cannot be linked; SOURCES.md is how you obtain the same ones.
-Tool commit: 334fe45
-Captured: 2026-09-06T23:00:14Z
+Tool commit: 29f5067
+Captured: 2026-09-06T23:14:13Z
 
 ## iheartest
 

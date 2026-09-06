@@ -100,7 +100,11 @@ they are genuinely different despite yielding the same file:
   before it is uploaded, so the claim to make is "this is the exact upload
   candidate", and it holds because the workflow passes one `IPA_PATH` to the
   gate and to `altool` with no rebuild between them.
-- **Out of CI**, fetch the artifact from the run that produced the build:
+- **Out of CI**, fetch the artifact from the run that produced the build. The
+  recorded digest proves you got the bytes the run stored — it does **not**, by
+  itself, prove those bytes are what Apple received. That comes from the
+  workflow keeping one `IPA_PATH` across attest, artifact upload and `altool`;
+  where a pipeline does not, call the download a build candidate:
 
 ```bash
 # from the Depot/GitHub Actions run that produced the TestFlight build

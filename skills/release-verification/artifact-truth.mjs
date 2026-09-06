@@ -201,6 +201,36 @@ function parseBinaryPlist(buf) {
 // Read every shipped text file under the app bundle once, so bundle rules and
 // capability coupling scan the SAME bytes the device runs.
 function readShippedText(appDir, subdir) {
+  // The artifact boundary is the whole contract: this tool's verdicts are only
+  // worth anything if every byte behind them came out of the .app that shipped.
+  // `webBundle.root` is manifest-supplied, and an unchecked path join lets it
+  // LEAVE that boundary -- reproduced live, root "../../" scanned the extraction
+  // parent and printed VERDICT: CLEAN over files that were never in the app.
+  // The same escape could just as easily manufacture a finding.
+  //
+  // Rejected here rather than sanitized: a root that points outside the bundle
+  // is a broken manifest, and silently rewriting it to something safe would hide
+  // that. Checked structurally (no absolute, no ".." segment) AND positionally
+  // (the resolved path must sit inside appDir), because either check alone can
+  // be walked around -- symlinks and normalization differences defeat the string
+  // test, and a crafted relative path can normalize back inside while still
+  // being wrong.
+  if (subdir !== undefined && subdir !== null) {
+    if (typeof subdir !== 'string' || subdir.trim() === '') {
+      throw new Error(`webBundle.root must be a non-empty string (got ${JSON.stringify(subdir)})`);
+    }
+    if (path.isAbsolute(subdir) || /^[A-Za-z]:/.test(subdir)) {
+      throw new Error(`webBundle.root "${subdir}" is an absolute path; it must be relative to the shipped .app`);
+    }
+    if (subdir.split(/[\\/]/).includes('..')) {
+      throw new Error(`webBundle.root "${subdir}" contains a ".." segment, which would scan files outside the shipped .app`);
+    }
+    const resolvedRoot = path.resolve(appDir, subdir);
+    const base = path.resolve(appDir);
+    if (resolvedRoot !== base && !resolvedRoot.startsWith(base + path.sep)) {
+      throw new Error(`webBundle.root "${subdir}" resolves outside the shipped .app (${resolvedRoot}); only bytes from the artifact may inform a verdict`);
+    }
+  }
   const root = subdir ? path.join(appDir, subdir) : appDir;
   const files = [];
   if (!fs.existsSync(root)) return { root, files, missing: true };

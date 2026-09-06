@@ -9,7 +9,11 @@ the TestFlight build of record, if you need to re-verify after expiry.
 
 **Every row carries a run id, an artifact id and the artifact's zip digest**, so
 a reader can re-fetch the same bytes and check them against the IPA sha256 in
-`REAL-ARTIFACT-RECEIPTS.md` rather than taking the receipt's word for it. The
+`REAL-ARTIFACT-RECEIPTS.md` rather than taking the receipt's word for it. That
+establishes **retrieval integrity**: you have what the run stored. It is not by
+itself proof that those bytes reached TestFlight — that comes from the workflow
+carrying one `IPA_PATH` through attestation, artifact upload and `altool`, which
+`ios-depot.yml` does and which the standard's stage 3 spells out. The
 two AWARE rows originally carried only a TestFlight tag, which made them
 unre-fetchable for no reason other than that I had not written the ids down; a
 review pass caught the asymmetry with the iHEARtest row. **Checked 2026-09-06:
