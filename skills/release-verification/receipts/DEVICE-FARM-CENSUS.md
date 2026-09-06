@@ -54,6 +54,7 @@ a year from now.
 
 ```
   HTTP 200  BUILTIN_FUZZ  compatible=1 incompatible=0
+  HTTP 200  XCTEST        compatible=1 incompatible=0
   HTTP 200  XCTEST_UI     compatible=1 incompatible=0
   HTTP 400  APPIUM_NODE   ArgumentException Invalid input for ScheduleRun API
             detected. The service could not schedule a run because the test type
@@ -61,13 +62,25 @@ a year from now.
             edit your request to specify a custom environment mode test spec file.
 ```
 
-So XCTest UI needs no custom-environment YAML and no additional artifact on the
-pool we already have, and Appium mandates a test spec. That is the evidence
-behind the stage-4 ladder ordering.
+So XCTest UI needs **no custom-environment YAML and no change to the device
+pool**, and Appium mandates a test spec. That is the evidence behind the stage-4
+ladder ordering.
+
+**It does need its own test bundle** (`XCTEST_UI_TEST_PACKAGE` alongside
+`IOS_APP`) — an XCUITest run has to have tests to run. An earlier version of
+this file said "no additional artifact", which was false and, worse, contradicted
+the corrected sentence in the standard that cites this file as its evidence. What
+the probe establishes is that the *surrounding infrastructure* needs nothing new;
+writing the tests is the work.
+
+`XCTEST` was missing from an earlier capture even though the standard's claim
+names three test types. Rather than weaken the claim, the probe was re-run for
+the third; the row above is that run. A claim whose stated provenance does not
+cover it is unsupported even when it happens to be true.
 
 **A trap worth recording, because it produced a confidently wrong answer.** The
 first probe omitted `appArn` and returned HTTP 200 with
-`compatible=0 incompatible=0` for *all four* test types — including
+`compatible=0 incompatible=0` for *every* test type asked — including
 `BUILTIN_FUZZ`, which this pool has demonstrably run 21 times. Read literally
 that says the pool is incompatible with everything. It does not: with no app to
 evaluate against, the API has nothing to judge and answers with empty lists
