@@ -176,9 +176,11 @@ artifact check.
    manifest was validated by pointing it at Build 58 (caught all three real
    defects) before Build 59 (clean).
 5. Add the `capabilityCoupling` rules for every privacy API the app could
-   plausibly reach, including ones you believe it does not — those produce the
-   "correctly undeclared" certification, which is the output you want when a
-   reviewer asks "are we sure the mic is not in there".
+   plausibly reach, including ones you believe it does not. Those produce the
+   "no shipped-bundle path matches, and the key is undeclared" line, which is
+   what you want on hand when someone asks whether the mic is in there — read
+   at its real strength: no configured pattern matched the shipped text, which
+   is evidence, not proof of unreachability.
 
 ## Where it belongs in CI, and where it actually runs today
 
