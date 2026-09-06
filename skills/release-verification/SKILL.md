@@ -25,11 +25,13 @@ repo answers a question nobody asked. Two incidents in one week made this
 concrete, and they point in **opposite** directions, which is what makes the
 lesson trustworthy rather than a rule of thumb:
 
-- **iHEARtest, builds 53 to 58.** Reading the repo would not have flagged
+- **iHEARtest, four shipped builds.** Reading the repo would not have flagged
   anything. The shipped app hands a PNG to the iOS share sheet; a user
   choosing *Save Image* causes a write to the photo library on the app's
   behalf. `Info.plist` declared no `NSPhotoLibraryAddUsageDescription`, so iOS
-  killed the process under TCC. Five builds. Apple's own binary scanner cannot
+  killed the process under TCC. It shipped that way in 53, 56, 57 and 58 (54
+  and 55 never shipped, so it is four builds rather than a contiguous range).
+  Apple's own binary scanner cannot
   see it, because that scanner does static API-surface analysis and the app
   links no PhotoKit at all.
 - **AWARE, one day later.** Reading the repo produced a confident P0 that was

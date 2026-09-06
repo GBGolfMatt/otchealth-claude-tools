@@ -26,7 +26,7 @@
       {
         "ifBundleMatches": "navigator\\.share|canShare",
         "requirePlistKey": "NSPhotoLibraryAddUsageDescription",
-        "why": "Same TCC class that crashed iHEARtest builds 53 to 58, but narrowed. A bare share call is not evidence of a photo-library write: sharing a PDF offers Save to Files and never touches the library, while sharing a PNG offers Save Image and does. AWARE shares PDFs, so requiring the photo-add key on any navigator.share would be a false positive. Both patterns must hit the SAME file, so a thumbnail helper elsewhere in the bundle cannot combine with an unrelated share call to trip it.",
+        "why": "Same TCC class that crashed iHEARtest builds 53, 56, 57 and 58, but narrowed. A bare share call is not evidence of a photo-library write: sharing a PDF offers Save to Files and never touches the library, while sharing a PNG offers Save Image and does. AWARE shares PDFs, so requiring the photo-add key on any navigator.share would be a false positive. Both patterns must hit the SAME file, so a thumbnail helper elsewhere in the bundle cannot combine with an unrelated share call to trip it.",
         "andBundleMatches": "image/png|image/jpeg|toBlob|toDataURL"
       }
     ]

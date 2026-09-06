@@ -224,6 +224,21 @@ const compiled = inspect(`validating rules in ${manifestPath}`, () => {
       throw new Error(`capabilityCoupling[${i}]: requirePlistKey must be a non-empty string, got ${JSON.stringify(r.requirePlistKey)}`);
     }
   }
+  // infoPlist rules carry no regex, but a malformed one is just as bad: an
+  // entry with no `key` becomes `plist[undefined]`, which quietly reports
+  // "undefined MISSING" or passes a forbidden check that never looked at
+  // anything. Nonsense matching is worse than a crash because it is reported
+  // as a result.
+  const ip = expect.infoPlist || {};
+  for (const [i, r] of (ip.required || []).entries()) {
+    if (typeof r.key !== 'string' || r.key === '') throw new Error(`infoPlist.required[${i}]: key must be a non-empty string, got ${JSON.stringify(r.key)}`);
+  }
+  for (const [i, r] of (ip.forbidden || []).entries()) {
+    if (typeof r.key !== 'string' || r.key === '') throw new Error(`infoPlist.forbidden[${i}]: key must be a non-empty string, got ${JSON.stringify(r.key)}`);
+  }
+  for (const k of Object.keys(ip.equals || {})) {
+    if (k === '') throw new Error('infoPlist.equals: keys must be non-empty strings');
+  }
   if (expect.renderedVersion && (typeof expect.renderedVersion.elementId !== 'string' || expect.renderedVersion.elementId === '')) {
     throw new Error('renderedVersion.elementId must be a non-empty string');
   }
@@ -237,10 +252,21 @@ const art = inspect(`opening ${ipaPath}`, () => extract(ipaPath));
 
 const plist = inspect('parsing Info.plist', () => {
   const parsed = readPlist(path.join(art.appDir, 'Info.plist'));
-  // A binary-plist reader that silently returns a non-object would make every
-  // plist rule vacuously pass, so refuse rather than continue.
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('Info.plist did not parse to a dictionary');
+  }
+  // An EMPTY object is the dangerous case, and it is what the XML reader
+  // returns for any input it does not understand -- malformed XML, truncated
+  // output, or plain garbage all yield {} because the key/value regex simply
+  // finds no matches. {} is a dictionary, so a type check alone lets it
+  // through, and then every plist rule passes vacuously and the run prints
+  // VERDICT: CLEAN over an artifact nobody managed to read. Every real
+  // Info.plist in a built app has CFBundleIdentifier, so its absence means the
+  // parse failed rather than that the app lacks an identifier.
+  const keys = Object.keys(parsed);
+  if (keys.length === 0) throw new Error('Info.plist parsed to an empty dictionary (malformed, truncated, or not a plist at all)');
+  if (!('CFBundleIdentifier' in parsed)) {
+    throw new Error(`Info.plist parsed but has no CFBundleIdentifier (got ${keys.length} key(s): ${keys.slice(0, 5).join(', ')}) -- treating this as a failed parse rather than a readable plist`);
   }
   return parsed;
 });
@@ -284,13 +310,17 @@ if (expect.webBundle) {
     violations.push({ rule: 'webBundle', detail: `declared bundle root not found in the artifact: ${expect.webBundle.root}`, why: 'the manifest describes a bundle layout this build does not produce' });
   } else {
     const hay = bundle.files.map((f) => `\n/*${f.rel}*/\n${f.text}`).join('');
+    // Match with the COMPILED regex. These were compiled during validation but
+    // then evaluated with String.includes, so `getUserMedia|mediaDevices` was
+    // silently searched for as that literal 24-character string and matched
+    // nothing -- a rule that looks like it is guarding and is not.
     for (const c of expect.webBundle.mustNotContain || []) {
-      const hits = bundle.files.filter((f) => f.text.includes(c.pattern)).map((f) => f.rel);
+      const hits = bundle.files.filter((f) => rx(c.pattern).test(f.text)).map((f) => f.rel);
       if (hits.length) violations.push({ rule: 'webBundle.mustNotContain', detail: `${c.pattern} found in ${hits.slice(0, 4).join(', ')}`, why: c.why });
       else passes.push(`bundle excludes ${c.pattern}`);
     }
     for (const c of expect.webBundle.mustContain || []) {
-      if (hay.includes(c.pattern)) passes.push(`bundle contains ${c.pattern}`);
+      if (rx(c.pattern).test(hay)) passes.push(`bundle contains ${c.pattern}`);
       else violations.push({ rule: 'webBundle.mustContain', detail: `${c.pattern} NOT found in the shipped bundle`, why: c.why });
     }
   }

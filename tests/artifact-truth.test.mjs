@@ -420,3 +420,66 @@ test('renderedVersion says the tag is absent rather than blaming the version', (
     assert.match(out, /no element with id "app-version-tag"/);
     assert.match(out, /rendered at runtime/);
 });
+
+// --- an unreadable plist must never reach CLEAN -----------------------------
+
+test('garbage in Info.plist exits 2 rather than printing CLEAN', () => {
+    // The worst outcome this tool can produce, and it did: the XML reader
+    // returns {} for anything it does not understand, because its key/value
+    // regex simply finds no matches. {} is a dictionary, so a type check alone
+    // let it through, every plist rule then passed vacuously, and the run
+    // printed VERDICT: CLEAN over an artifact nobody had read.
+    const ipa = makeIpa({ rawPlist: 'this is not a plist at all' });
+    const { code, out } = run(ipa, makeManifest({}));
+    assert.equal(code, 2, out);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('a plist that parses but has no CFBundleIdentifier is treated as a failed parse', () => {
+    const ipa = makeIpa({ plist: { SomeUnrelatedKey: 'x' } });
+    const { code, out } = run(ipa, makeManifest({}));
+    assert.equal(code, 2, out);
+    assert.match(out, /no CFBundleIdentifier/);
+});
+
+// --- webBundle patterns are REGEXES, and must be matched as such ------------
+
+test('a webBundle pattern with alternation matches as a regex, not a literal', () => {
+    // These were compiled during validation and then evaluated with
+    // String.includes, so `getUserMedia|mediaDevices` was searched for as that
+    // literal 24-character string and matched nothing: a rule that looks like
+    // it is guarding and is not.
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/mic.js': 'navigator.mediaDevices.getUserMedia({audio:true})' } });
+    const manifest = makeManifest({
+        webBundle: { root: 'public', mustNotContain: [{ pattern: 'getUserMedia|mediaDevices', why: 'the mic path must not ship' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /getUserMedia\|mediaDevices found in js\/mic\.js/);
+});
+
+test('a mustContain alternation is satisfied by either branch', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/a.js': 'cioConsentGranted()' } });
+    const manifest = makeManifest({
+        webBundle: { root: 'public', mustContain: [{ pattern: 'cioConsentGranted|analyticsConsentGranted' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+});
+
+// --- infoPlist rule shapes are validated too --------------------------------
+
+test('an infoPlist rule with no key exits 2 rather than matching undefined', () => {
+    // `plist[undefined]` does not throw; it quietly reports "undefined MISSING"
+    // or passes a forbidden check that never looked at anything. Nonsense
+    // matching is worse than a crash because it is reported as a result.
+    const ipa = makeIpa({ plist: BASE_PLIST });
+    for (const expect_ of [
+        { infoPlist: { required: [{ why: 'no key given' }] } },
+        { infoPlist: { forbidden: [{ why: 'no key given' }] } },
+    ]) {
+        const { code, out } = run(ipa, makeManifest(expect_));
+        assert.equal(code, 2, out);
+        assert.match(out, /key must be a non-empty string/);
+    }
+});
