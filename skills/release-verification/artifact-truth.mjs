@@ -197,6 +197,39 @@ function inspect(what, fn) {
 
 const manifest = inspect(`reading manifest ${manifestPath}`, () => JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
 const expect = manifest.expect || {};
+
+// Compile every pattern up front, inside inspect(). A manifest is valid JSON
+// long before it is a valid RULE SET: `ifBundleMatches: "["` parses fine and
+// then throws a SyntaxError at `new RegExp` deep in the run, which Node turns
+// into exit 1 -- reporting a broken verifier configuration as a discovered
+// violation of the artifact. Those are opposite conclusions. Compiling here
+// also means a rule missing its required fields fails closed instead of
+// matching nothing and quietly passing.
+const compiled = inspect(`validating rules in ${manifestPath}`, () => {
+  const patterns = new Map();
+  const compile = (where, source) => {
+    if (typeof source !== 'string' || source === '') throw new Error(`${where}: pattern must be a non-empty string, got ${JSON.stringify(source)}`);
+    try {
+      patterns.set(source, new RegExp(source));
+    } catch (e) {
+      throw new Error(`${where}: /${source}/ is not a valid regular expression (${e.message})`);
+    }
+  };
+  for (const [i, r] of ((expect.webBundle && expect.webBundle.mustContain) || []).entries()) compile(`webBundle.mustContain[${i}]`, r.pattern);
+  for (const [i, r] of ((expect.webBundle && expect.webBundle.mustNotContain) || []).entries()) compile(`webBundle.mustNotContain[${i}]`, r.pattern);
+  for (const [i, r] of (expect.capabilityCoupling || []).entries()) {
+    compile(`capabilityCoupling[${i}].ifBundleMatches`, r.ifBundleMatches);
+    if (r.andBundleMatches !== undefined) compile(`capabilityCoupling[${i}].andBundleMatches`, r.andBundleMatches);
+    if (typeof r.requirePlistKey !== 'string' || r.requirePlistKey === '') {
+      throw new Error(`capabilityCoupling[${i}]: requirePlistKey must be a non-empty string, got ${JSON.stringify(r.requirePlistKey)}`);
+    }
+  }
+  if (expect.renderedVersion && (typeof expect.renderedVersion.elementId !== 'string' || expect.renderedVersion.elementId === '')) {
+    throw new Error('renderedVersion.elementId must be a non-empty string');
+  }
+  return patterns;
+});
+const rx = (source) => compiled.get(source);
 const violations = [];
 const passes = [];
 
@@ -276,11 +309,20 @@ if (expect.renderedVersion) {
   if (!idxFile) {
     violations.push({ rule: 'renderedVersion', detail: `cannot find ${expect.renderedVersion.file || 'index.html'} in the shipped bundle`, why: 'the version the user sees cannot be verified' });
   } else {
-    const re = new RegExp(`id="${expect.renderedVersion.elementId}"[^>]*>([^<]*)<`);
+    // Accept single OR double quotes around the id, and allow the id anywhere
+    // in the tag rather than requiring it first: `<span class="x" id='tag'>` is
+    // valid HTML that the old double-quote-only pattern reported as a release
+    // defect. The static-markup assumption that remains is real and stated in
+    // the message: this reads the SHIPPED HTML, so a version injected purely at
+    // runtime by client-side rendering cannot be seen here and the rule should
+    // not be declared for such an app.
+    const id = expect.renderedVersion.elementId;
+    const re = new RegExp(`<[^>]*\\bid\\s*=\\s*["']${id}["'][^>]*>([^<]*)<`);
     const m = idxFile.text.match(re);
     const rendered = m ? m[1].trim() : null;
     const want = `v${plist.CFBundleShortVersionString}`;
     if (rendered === want) passes.push(`rendered version tag "${rendered}" matches the binary`);
+    else if (rendered === null) violations.push({ rule: 'renderedVersion', detail: `no element with id "${id}" and literal text found in ${idxFile.rel}`, why: 'either the tag was removed, or its text is rendered at runtime -- in which case this rule cannot verify it and should not be declared for this app' });
     else violations.push({ rule: 'renderedVersion', detail: `version tag renders ${JSON.stringify(rendered)}, binary is ${JSON.stringify(want)}`, why: 'the in-app version must match the build, and an unsubstituted template here also mis-tags every error report to a nonsense release' });
   }
 }
@@ -296,8 +338,8 @@ for (const rule of expect.capabilityCoupling || []) {
   // PDF offers Save to Files, sharing a PNG offers Save Image, and only the
   // second reaches the library. Both patterns must hit the SAME file, since two
   // unrelated modules happening to mention each is not evidence of one flow.
-  const primary = new RegExp(rule.ifBundleMatches);
-  const secondary = rule.andBundleMatches ? new RegExp(rule.andBundleMatches) : null;
+  const primary = rx(rule.ifBundleMatches);
+  const secondary = rule.andBundleMatches ? rx(rule.andBundleMatches) : null;
   const reached = bundle.files
     .filter((f) => primary.test(f.text) && (!secondary || secondary.test(f.text)))
     .map((f) => f.rel);

@@ -312,3 +312,111 @@ test('renderedVersion fails loud when the file is not where the manifest says', 
     assert.equal(code, 1, out);
     assert.match(out, /cannot find index\.html in the shipped bundle/);
 });
+
+// --- the binary-plist parser, on real production bytes ----------------------
+// tests/fixtures/binary-info.plist is the actual Info.plist lifted out of the
+// shipped AWARE IPA (1.4.0 / 1779565782). Every other fixture here writes XML,
+// which left the custom bplist00 reader -- the path that runs against every
+// real build -- with no coverage at all. That gap was worth closing with real
+// bytes rather than a hand-rolled writer whose own bugs would then be what is
+// under test.
+
+const BINARY_PLIST = path.join(ROOT, 'tests/fixtures/binary-info.plist');
+
+function makeBinaryPlistIpa(web = {}) {
+    return makeIpa({ rawPlist: fs.readFileSync(BINARY_PLIST), web });
+}
+
+test('the binary-plist reader parses a real shipped Info.plist', () => {
+    const ipa = makeBinaryPlistIpa();
+    const manifest = makeManifest({
+        infoPlist: { equals: { CFBundleIdentifier: 'com.innerscope.aware' } },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+    // The header line proves the version strings came out of the binary blob.
+    assert.match(out, /1\.4\.0 \(1779565782\)/);
+});
+
+test('a plist rule fails against the real binary plist when it should', () => {
+    // Guards the inverse: a parser returning an empty object would make the
+    // test above pass vacuously and every forbidden-key rule pass too.
+    const ipa = makeBinaryPlistIpa();
+    const manifest = makeManifest({
+        infoPlist: { equals: { CFBundleIdentifier: 'com.innerscope.iheartest' } },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /com\.innerscope\.aware/);
+});
+
+test('capability coupling reads the real binary plist: absent key, unreachable API', () => {
+    // This is the exact claim the tool makes about the shipped AWARE build.
+    const ipa = makeBinaryPlistIpa({ 'js/app.js': 'renderToday();' });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription', forbidIfUnreachable: true }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+});
+
+// --- manifest validation is an INSPECTION step, not a violation -------------
+
+test('an invalid regex in the manifest exits 2, not 1', () => {
+    // A manifest can be valid JSON and still be a broken rule set. Compiling
+    // mid-run turned that into exit 1, which claims the artifact is at fault.
+    const ipa = makeIpa({ plist: BASE_PLIST });
+    const manifest = makeManifest({
+        capabilityCoupling: [{ ifBundleMatches: '[', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /not a valid regular expression/);
+});
+
+test('a rule missing requirePlistKey exits 2 rather than matching nothing', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST });
+    const manifest = makeManifest({ capabilityCoupling: [{ ifBundleMatches: 'getUserMedia' }] });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+    assert.match(out, /requirePlistKey/);
+});
+
+test('a webBundle pattern that is not a string exits 2', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/a.js': 'x' } });
+    const manifest = makeManifest({ webBundle: { root: 'public', mustNotContain: [{ why: 'no pattern given' }] } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, out);
+});
+
+// --- renderedVersion markup tolerance ---------------------------------------
+
+test('renderedVersion accepts single quotes and a non-leading id attribute', () => {
+    // `<span class="x" id='tag'>` is valid HTML that the double-quote-only,
+    // id-must-come-first pattern reported as a release defect.
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        renderedVersion: { file: 'index.html', elementId: 'app-version-tag' },
+    });
+    const ipa = makeIpa({
+        plist: BASE_PLIST,
+        web: { 'index.html': "<footer><span class=\"muted\" id='app-version-tag'>v1.2.3</span></footer>" },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+});
+
+test('renderedVersion says the tag is absent rather than blaming the version', () => {
+    // "renders null, binary is v1.2.3" reads like a version mismatch. A missing
+    // or runtime-rendered tag is a different problem and gets its own message.
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        renderedVersion: { file: 'index.html', elementId: 'app-version-tag' },
+    });
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'index.html': '<footer></footer>' } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /no element with id "app-version-tag"/);
+    assert.match(out, /rendered at runtime/);
+});
