@@ -23,7 +23,28 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SHARED_IMPORT = /["']\.\.\/\.\.\/setup\/([A-Za-z0-9._-]+\.mjs)["']/g;
+// Every form that can create a module dependency, not just `import x from "..."`. An earlier draft
+// of this file matched only static `from "..."` specifiers, which silently ignored dynamic
+// `import(...)` and `export ... from` re-exports -- so a module could acquire a dependency on a
+// third sibling directory and these tests would still pass while the installed layout broke. That
+// is not hypothetical: setup/drift-recon.mjs and setup/image-drift.mjs already use dynamic
+// `await import("../skills/...")` today, and the first version of this test could not see them.
+// Backticks are included because a template literal with a static prefix
+// (`import(\`./model-routing.mjs?t=${x}\`)`, which setup/model-routing.test.mjs really does) is
+// still a real dependency on a real path; only the prefix before any ${ is meaningful.
+const SPECIFIER_FORMS = [
+  /\bfrom\s*["'`]([^"'`$]+)/g,          // import x from "..."  /  export x from "..."
+  /\bimport\s*\(\s*["'`]([^"'`$]+)/g,   // await import("...")
+  /\brequire\s*\(\s*["'`]([^"'`$]+)/g,  // require("...") in any CommonJS holdout
+];
+
+function specifiersIn(src) {
+  const out = [];
+  for (const re of SPECIFIER_FORMS) for (const m of src.matchAll(re)) out.push(m[1]);
+  return out;
+}
+
+const SHARED_PREFIX = "../../setup/";
 
 function walk(dir) {
   const out = [];
@@ -40,8 +61,9 @@ function sharedModulesReferencedBySkills() {
   const refs = new Map(); // module -> [files]
   for (const file of walk(join(ROOT, "skills"))) {
     const src = readFileSync(file, "utf8");
-    for (const m of src.matchAll(SHARED_IMPORT)) {
-      const mod = m[1];
+    for (const spec of specifiersIn(src)) {
+      if (!spec.startsWith(SHARED_PREFIX)) continue;
+      const mod = spec.slice(SHARED_PREFIX.length);
       if (!refs.has(mod)) refs.set(mod, []);
       refs.get(mod).push(file.slice(ROOT.length + 1));
     }
@@ -95,8 +117,8 @@ test("the shared setup modules only reach back into setup/ or skills/, so the tw
   for (const e of readdirSync(join(ROOT, "setup"))) {
     if (!e.endsWith(".mjs")) continue;
     const src = readFileSync(join(ROOT, "setup", e), "utf8");
-    for (const m of src.matchAll(/from\s+["'](\.\.?\/[^"']+)["']/g)) {
-      const spec = m[1];
+    for (const spec of specifiersIn(src)) {
+      if (!spec.startsWith("./") && !spec.startsWith("../")) continue; // bare package specifier
       if (spec.startsWith("./") || spec.startsWith("../skills/")) continue;
       offenders.push(`${e} -> ${spec}`);
     }
