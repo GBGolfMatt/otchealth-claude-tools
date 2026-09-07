@@ -47,3 +47,14 @@ the metadata-only publication receipt and its hashes, then let the CFO verify an
 exact-path document read. Do not declare completion from a merged PR, successful
 image build, or scheduler trigger alone. Coordinate the release with the active CTO
 task to avoid changing shared image tags or unrelated jobs.
+
+## Follow-up implementation verification
+
+Implementation commit 0f99d29b2b7d2174cf3b8ec2018d4465cbc51723 passed
+[run 34157393707](https://github.com/InnerScopeHearing/otchealth-claude-tools/actions/runs/34157393707)
+on 2026-09-07 at 19:55:56 UTC. All mjs syntax checks passed; 3,001 Node tests,
+2,999 passed, 0 failed and 2 skipped. All five publication tests ran, as did the
+existing stock status tests. The index-writer and silent-success gates passed.
+This receipt-only follow-up changes no implementation or test code after that
+verified commit. The prompt-comparison job still lacked scorecards and is not
+claimed as a passed comparison. Production deployment remains outstanding.
