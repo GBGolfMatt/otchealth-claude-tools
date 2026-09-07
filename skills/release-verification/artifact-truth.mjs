@@ -87,12 +87,124 @@ if (!ipaPath || !manifestPath) {
 // be reported as clean, because "no violations found" and "we never looked"
 // print the same way otherwise.
 // ---------------------------------------------------------------------------
+// CRC-32 (the zip polynomial), implemented here rather than via `zlib.crc32`
+// because this file is VENDORED into app repos and runs on runners whose Node
+// version we do not control; `zlib.crc32` only exists from Node 20.15. A test
+// pins this against `zlib.crc32` wherever that is available.
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+// The CENTRAL DIRECTORY is the zip's authoritative record of its entries. Read
+// it directly instead of asking a helper, so we can compare it against what the
+// extractor actually produced.
+function readCentralDirectory(ipa) {
+  const buf = fs.readFileSync(ipa);
+  // End of Central Directory: scan back for the signature, allowing a comment.
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i >= buf.length - 22 - 0xffff; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('no end-of-central-directory record: not a zip archive');
+  let count = buf.readUInt16LE(eocd + 10);
+  let start = buf.readUInt32LE(eocd + 16);
+  // Zip64: the 32-bit fields saturate and the real values live in the zip64 EOCD.
+  if (count === 0xffff || start === 0xffffffff) {
+    const loc = eocd - 20;
+    if (loc < 0 || buf.readUInt32LE(loc) !== 0x07064b50) throw new Error('zip64 archive with no zip64 locator');
+    const z64 = Number(buf.readBigUInt64LE(loc + 8));
+    if (buf.readUInt32LE(z64) !== 0x06064b50) throw new Error('zip64 end-of-central-directory record not found');
+    count = Number(buf.readBigUInt64LE(z64 + 32));
+    start = Number(buf.readBigUInt64LE(z64 + 48));
+  }
+  const entries = new Map();
+  let p = start;
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) {
+      throw new Error(`central directory entry ${n} is malformed, so the archive cannot be trusted`);
+    }
+    const crc = buf.readUInt32LE(p + 16);
+    let size = buf.readUInt32LE(p + 24);
+    const nameLen = buf.readUInt16LE(p + 28);
+    const extraLen = buf.readUInt16LE(p + 30);
+    const commentLen = buf.readUInt16LE(p + 32);
+    const name = buf.subarray(p + 46, p + 46 + nameLen).toString('utf8');
+    if (size === 0xffffffff) {
+      // zip64 extended information extra field (header id 0x0001): uncompressed
+      // size is the first 8-byte value present.
+      const extra = buf.subarray(p + 46 + nameLen, p + 46 + nameLen + extraLen);
+      for (let q = 0; q + 4 <= extra.length;) {
+        const id = extra.readUInt16LE(q), len = extra.readUInt16LE(q + 2);
+        if (id === 0x0001 && len >= 8) { size = Number(extra.readBigUInt64LE(q + 4)); break; }
+        q += 4 + len;
+      }
+      if (size === 0xffffffff) throw new Error(`entry ${name} declares a zip64 size with no zip64 extra field`);
+    }
+    entries.set(name, { size, crc });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
 function extract(ipa) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-truth-'));
   try {
     execFileSync('unzip', ['-o', '-q', ipa, 'Payload/*', '-d', dir], { stdio: ['ignore', 'ignore', 'pipe'] });
   } catch (e) {
     throw new Error(`could not unzip ${ipa}: ${e && e.message}`);
+  }
+  // VERIFY WHAT WAS EXTRACTED AGAINST THE CENTRAL DIRECTORY.
+  //
+  // A zip carries TWO records of every entry: the local file header and the
+  // central directory. They can disagree, and different readers trust different
+  // ones -- `unzip` follows the local header when reading the stream, while
+  // `unzip -l`, Python's zipfile, and Java's jar all read the central directory.
+  // An entry whose local header declares a SHORTER size than the central one is
+  // silently truncated on extraction: unzip writes the prefix, prints nothing,
+  // and exits 0. A `mustNotContain` rule then reads a file with the offending
+  // line cut off and reports CLEAN -- verified end to end, and it is the same
+  // parser-confusion class as the Janus APK-verification bypasses.
+  //
+  // The verdict must not depend on which reader we happened to shell out to, so
+  // every extracted byte is checked against the authoritative record.
+  let central;
+  try {
+    central = readCentralDirectory(ipa);
+  } catch (e) {
+    throw new Error(`could not read the central directory of ${ipa}: ${e && e.message}`);
+  }
+  for (const [name, want] of central) {
+    if (!name.startsWith('Payload/') || name.endsWith('/')) continue;
+    const target = path.join(dir, name);
+    let st;
+    try {
+      st = fs.lstatSync(target);
+    } catch {
+      // Symlink targets and unreadable entries are handled elsewhere; an entry
+      // the extractor simply did not produce is the thing we must not ignore.
+      throw new Error(`the archive declares ${name} but extraction did not produce it, so the bundle on disk is not the shipped bundle`);
+    }
+    if (st.isSymbolicLink() || !st.isFile()) continue; // a symlink's "size" is its target path
+    if (st.size !== want.size) {
+      throw new Error(
+        `${name} is ${st.size} bytes on disk but the central directory declares ${want.size}. ` +
+        `The local and central headers disagree, so different readers see different content ` +
+        `and no verdict about this artifact would mean anything.`);
+    }
+    if (crc32(fs.readFileSync(target)) !== want.crc) {
+      throw new Error(`${name} does not match the CRC-32 recorded in the central directory, so the extracted bytes are not the archived bytes`);
+    }
   }
   const payload = path.join(dir, 'Payload');
   if (!fs.existsSync(payload)) throw new Error(`no Payload/ inside ${ipa} -- not an iOS app archive?`);
@@ -250,7 +362,23 @@ function parseXmlPlist(text) {
     skipSpace();
     if (i >= s.length) fail('ends where an element was expected, so the document is truncated');
     if (s[i] !== '<') fail(`has character data where an element was expected: ${JSON.stringify(s.slice(i, i + 40))}`);
-    const end = s.indexOf('>', i);
+    // Find the tag's '>' while RESPECTING QUOTED ATTRIBUTE VALUES. This used to
+    // be `s.indexOf('>', i)`, which is quote-blind, and that one call produced
+    // two opposite-direction bugs from a single root:
+    //   - `<plist version="a>b">` is LEGAL XML (only '<' and '&' are forbidden
+    //     inside an attribute value; '>' is not), and both ElementTree and
+    //     plistlib accept it -- but the tag was cut at the inner '>' and the
+    //     document was refused as malformed. A false exit 2 on a good artifact
+    //     blocks a release that should have shipped.
+    //   - and cutting early is only safe by luck; the general failure of a
+    //     quote-blind scan is mis-structuring a document, not refusing it.
+    let end = -1;
+    for (let j = i + 1, quote = null; j < s.length; j++) {
+      const ch = s[j];
+      if (quote) { if (ch === quote) quote = null; continue; }
+      if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (ch === '>') { end = j; break; }
+    }
     if (end < 0) fail('has an unterminated element (a "<" with no ">"), so the document is truncated');
     const body = s.slice(i + 1, end);
     i = end + 1;
@@ -270,6 +398,30 @@ function parseXmlPlist(text) {
       if (rest.trim() !== '') fail(`has the malformed closing tag <${body}>: a closing tag carries no attributes`);
     } else if (!/^(?:\s+[A-Za-z_:][\w.:-]*\s*=\s*(?:"[^"]*"|'[^']*'))*\s*$/.test(rest)) {
       fail(`has the malformed element <${body}>: what follows the name is not well-formed attributes`);
+    } else {
+      // Shape alone is not well-formedness. The regex above accepts ANY bytes
+      // between the quotes, so `<plist version="&bogus;">` passed and the
+      // document went on to produce VERDICT: CLEAN -- while ElementTree and
+      // plistlib both reject that same file. Returning a verdict on a document
+      // a real parser refuses is the exact thing exit 2 exists to prevent, and
+      // it is the same class as the masked-ASCII decoder: our reader seeing a
+      // document the real consumer does not.
+      //
+      // Validate with `decode`, the SAME function that validates character
+      // data, rather than a second copy of the rules -- one validator cannot
+      // drift out of agreement with itself.
+      const seen = new Set();
+      const attr = /\s+([A-Za-z_:][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+      for (let m; (m = attr.exec(rest)) !== null;) {
+        const [, aName, dq, sq] = m;
+        // XML forbids a duplicate attribute name on one element outright.
+        if (seen.has(aName)) fail(`has the element <${body}> with a duplicate attribute "${aName}", which no XML parser accepts`);
+        seen.add(aName);
+        const value = dq !== undefined ? dq : sq;
+        // A raw '<' is never legal inside an attribute value.
+        if (value.includes('<')) fail(`has the element <${body}> whose attribute "${aName}" contains a raw "<", so it is not well-formed XML`);
+        decode(value); // throws on a bare '&', an undefined entity, or an out-of-range char ref
+      }
     }
     return { close, selfClose, name };
   };

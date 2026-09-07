@@ -2385,3 +2385,168 @@ test('a legitimate non-ASCII usage string still reads exactly', () => {
     assert.equal(code, 0, `valid UTF-16 including a surrogate pair must read exactly; got ${code}: ${out}`);
     assert.match(out, /VERDICT: CLEAN/);
 });
+
+// --- tag scanning must respect quotes, and attributes must be validated ------
+//
+// Raised as a HIGH by the auto critic against the XML reader, and it turned out
+// to be ONE root cause with two opposite-direction failures: `readTag` found the
+// tag's '>' with a quote-blind `indexOf`, and the attribute check validated
+// SHAPE (`"[^"]*"`) without validating CONTENT.
+
+// Ask Python's ElementTree, an independent XML implementation, so each test
+// establishes the correct verdict rather than taking its author's word for it.
+function xmlVerdict(xml) {
+    return execFileSync('python3', ['-c', [
+        'import sys',
+        'import xml.etree.ElementTree as ET',
+        'try:',
+        '    ET.fromstring(sys.stdin.buffer.read()); print("ACCEPTED")',
+        'except Exception: print("REJECTED")',
+    ].join('\n')], { input: xml, encoding: 'utf8' }).trim();
+}
+
+const XML_BODY = '<dict>'
+    + '<key>CFBundleIdentifier</key><string>com.fixture.app</string>'
+    + '<key>CFBundleShortVersionString</key><string>1.0</string>'
+    + '<key>CFBundleName</key><string>Foo</string>'
+    + '</dict>';
+const xmlWithPlistTag = (tag) => `<?xml version="1.0" encoding="UTF-8"?>\n${tag}\n${XML_BODY}\n</plist>\n`;
+const NAME_IS_FOO = () => makeManifest({ infoPlist: { equals: { CFBundleName: 'Foo' } } });
+
+test('an undefined entity in an ATTRIBUTE is unreadable, not a CLEAN verdict', () => {
+    // The false CLEAN. The shape regex accepted any bytes between the quotes, so
+    // the document parsed and reported a verified pass while ElementTree and
+    // plistlib both refuse the same file.
+    const xml = xmlWithPlistTag('<plist version="&bogus;">');
+    assert.equal(xmlVerdict(xml), 'REJECTED', 'fixture bug: a real parser accepts this, so exit 2 would be wrong');
+    const { code, out } = run(makeIpa({ rawPlist: xml }), NAME_IS_FOO());
+    assert.equal(code, 2, `got ${code}: ${out}`);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+    assert.match(out, /undefined XML entity/);
+});
+
+test('a ">" inside a quoted attribute value is LEGAL and must still read clean', () => {
+    // The opposite-direction failure from the same root, and the reason the fix
+    // is a quote-aware scan rather than a stricter regex. Only '<' and '&' are
+    // forbidden inside an attribute value; '>' is not. A quote-blind indexOf cut
+    // the tag at the inner '>' and refused a document a real parser accepts --
+    // a false exit 2, which in a blocking gate stops a release that should ship.
+    const xml = xmlWithPlistTag('<plist version="a>b">');
+    assert.equal(xmlVerdict(xml), 'ACCEPTED', 'fixture bug: this really is legal XML');
+    const { code, out } = run(makeIpa({ rawPlist: xml }), NAME_IS_FOO());
+    assert.equal(code, 0, `legal XML must not be refused; got ${code}: ${out}`);
+    assert.match(out, /VERDICT: CLEAN/);
+});
+
+test('a duplicate attribute name is unreadable', () => {
+    const xml = xmlWithPlistTag('<plist version="1.0" version="2.0">');
+    assert.equal(xmlVerdict(xml), 'REJECTED');
+    const { code, out } = run(makeIpa({ rawPlist: xml }), NAME_IS_FOO());
+    assert.equal(code, 2, `got ${code}: ${out}`);
+    assert.match(out, /duplicate attribute/);
+});
+
+test('a raw "<" inside an attribute value is unreadable', () => {
+    const xml = xmlWithPlistTag('<plist version="a<b">');
+    assert.equal(xmlVerdict(xml), 'REJECTED');
+    const { code, out } = run(makeIpa({ rawPlist: xml }), NAME_IS_FOO());
+    assert.equal(code, 2, `got ${code}: ${out}`);
+    assert.match(out, /raw "<"/);
+});
+
+// --- the container layer: local header vs central directory ------------------
+//
+// A zip carries TWO records of every entry. `unzip` follows the local file
+// header when reading the stream; `unzip -l`, Python's zipfile and Java's jar
+// all read the central directory, which is the format's authoritative record.
+// When they disagree the verdict becomes a function of which reader we shelled
+// out to. Found in round 32; same parser-confusion class as the Janus APK
+// verification bypasses.
+
+// Build a stored (uncompressed) zip by hand so the two headers can be made to
+// disagree deliberately. `lie` shortens ONLY the local header's size/CRC; the
+// full bytes are still physically present, which is exactly the shape unzip
+// truncates in silence.
+function handBuiltZip(entries) {
+    const crcOf = (b) => {
+        const t = new Int32Array(256);
+        for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
+        let c = -1;
+        for (let i = 0; i < b.length; i++) c = t[(c ^ b[i]) & 0xff] ^ (c >>> 8);
+        return (c ^ -1) >>> 0;
+    };
+    const parts = [], central = [];
+    let offset = 0;
+    for (const { name, data, visibleLen } of entries) {
+        const nameB = Buffer.from(name, 'utf8');
+        const full = Buffer.from(data, 'utf8');
+        const localLen = visibleLen ?? full.length;          // the lie, when given
+        const localCrc = crcOf(full.subarray(0, localLen));  // matches the truncated read
+        const lh = Buffer.alloc(30);
+        lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4);
+        lh.writeUInt32LE(localCrc, 14); lh.writeUInt32LE(localLen, 18); lh.writeUInt32LE(localLen, 22);
+        lh.writeUInt16LE(nameB.length, 26);
+        parts.push(lh, nameB, full);
+        const ch = Buffer.alloc(46);
+        ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+        ch.writeUInt32LE(crcOf(full), 16);                    // the TRUE crc
+        ch.writeUInt32LE(full.length, 20); ch.writeUInt32LE(full.length, 24); // the TRUE size
+        ch.writeUInt16LE(nameB.length, 28);
+        ch.writeUInt32LE(0o644 << 16, 38); ch.writeUInt32LE(offset, 42);
+        central.push(ch, nameB);
+        offset += lh.length + nameB.length + full.length;
+    }
+    const body = Buffer.concat(parts), cd = Buffer.concat(central);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(body.length, 16);
+    const file = path.join(tmp('zip'), 'App.ipa');
+    fs.writeFileSync(file, Buffer.concat([body, cd, eocd]));
+    return file;
+}
+
+const POC_PLIST = '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>'
+    + '<key>CFBundleIdentifier</key><string>com.fixture.app</string>'
+    + '<key>CFBundleShortVersionString</key><string>1.0</string>'
+    + '</dict></plist>\n';
+const SAFE = "console.log('safe build');\n";
+const HIDDEN = 'navigator.mediaDevices.getUserMedia({audio:true});\n';
+const NO_MIC = () => makeManifest({
+    webBundle: { root: 'public', mustNotContain: [{ pattern: 'getUserMedia', why: 'the shipped bundle must not reach the microphone' }] },
+});
+
+test('a local header that under-declares its size is unreadable, not a CLEAN', () => {
+    // unzip writes only the local-declared prefix, prints nothing and exits 0,
+    // so mustNotContain reads a file with the offending line cut off. Python's
+    // zipfile and Java's jar both see the full bytes, and so does `unzip -l`.
+    const ipa = handBuiltZip([
+        { name: 'Payload/App.app/Info.plist', data: POC_PLIST },
+        { name: 'Payload/App.app/public/app.js', data: SAFE + HIDDEN, visibleLen: SAFE.length },
+    ]);
+    // Ground truth: an independent, central-directory-driven reader sees the tail.
+    const seen = execFileSync('python3', ['-c', [
+        'import sys,zipfile',
+        'z=zipfile.ZipFile(sys.argv[1])',
+        'print("getUserMedia" in z.read("Payload/App.app/public/app.js").decode())',
+    ].join('\n'), ipa], { encoding: 'utf8' }).trim();
+    assert.equal(seen, 'True', 'fixture bug: the true archived bytes must contain the tail');
+
+    const { code, out } = run(ipa, NO_MIC());
+    assert.equal(code, 2, `a truncating extraction must not yield a verdict; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+    assert.doesNotMatch(out, /^\s*fail\b/m, 'exit 2 reports no finding either');
+    assert.match(out, /central directory declares/);
+});
+
+test('a hand-built archive whose headers AGREE still reads normally', () => {
+    // The counterweight, and the proof that the central-directory reader works
+    // on a legitimate archive rather than only rejecting. Same builder, no lie.
+    const ipa = handBuiltZip([
+        { name: 'Payload/App.app/Info.plist', data: POC_PLIST },
+        { name: 'Payload/App.app/public/app.js', data: SAFE },
+    ]);
+    const { code, out } = run(ipa, NO_MIC());
+    assert.equal(code, 0, `an honest archive must read clean; got ${code}: ${out}`);
+    assert.match(out, /VERDICT: CLEAN/);
+});
