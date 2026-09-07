@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const execFileP = promisify(execFile);
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -83,7 +83,7 @@ function runHeartbeat(args, { presetStore } = {}) {
     AWS_ACCESS_KEY_ID: "AKIAUNITTESTFAKE0000",
     AWS_SECRET_ACCESS_KEY: "unit-test-fake-secret-access-key-not-real",
   };
-  return execFileP(process.execPath, ["--import", preload, HEARTBEAT_MJS, ...args], { env, timeout: 15000 })
+  return execFileP(process.execPath, ["--import", pathToFileURL(preload).href, HEARTBEAT_MJS, ...args], { env, timeout: 15000 })
     .then((r) => ({ status: 0, stdout: r.stdout, stderr: r.stderr, calls: readCalls(logPath), store: JSON.parse(readFileSync(storePath, "utf8")) }))
     .catch((e) => ({ status: e.code ?? 1, stdout: e.stdout || "", stderr: e.stderr || "", calls: readCalls(logPath), store: JSON.parse(readFileSync(storePath, "utf8")) }));
 }
@@ -160,4 +160,58 @@ test("heartbeat.mjs no longer talks to Azure Blob or ARM (ported to S3, 2026-08-
   assert.doesNotMatch(stripped, /AZURE_SP_(TENANT|CLIENT)_ID/, "must not read the old Azure SP creds");
   assert.doesNotMatch(stripped, /armToken|armLastExec|armStartJob|buildSas/, "the old Azure/ARM primitives must be gone");
   assert.match(src, /from "\.\.\/skills\/kb-memory\/commons-store\.mjs"/, "must route storage through the shared commons-store facade");
+});
+
+
+test("a future last_ok cannot make an unregistered heartbeat LIVE", async () => {
+  const future = new Date(Date.now() + 86400000).toISOString();
+  const presetStore = {
+    ["/" + S3_KEY_PREFIX + "_HEARTBEAT/future-clock.json"]: JSON.stringify({ job: "future-clock", last_event: "ok", last_ok: future }),
+  };
+  const r = await runHeartbeat(["check", "--json"], { presetStore });
+  assert.equal(r.status, 0, r.stderr);
+  const row = JSON.parse(r.stdout).find((x) => x.job === "future-clock");
+  assert.equal(row.status, "DEAD");
+  assert.equal(row.ageMin, null);
+});
+
+test("a future last_ok cannot hide a missing registered job", async () => {
+  const future = new Date(Date.now() + 86400000).toISOString();
+  const presetStore = {
+    ["/" + S3_KEY_PREFIX + "_HEARTBEAT/brain-reindex.json"]: JSON.stringify({ job: "brain-reindex", last_event: "ok", last_ok: future }),
+  };
+  const r = await runHeartbeat(["check", "--json"], { presetStore });
+  assert.equal(r.status, 0, r.stderr);
+  const row = JSON.parse(r.stdout).find((x) => x.job === "brain-reindex");
+  assert.equal(row.status, "DEAD");
+  assert.equal(row.ageMin, null);
+  assert.equal(row.autoRestart.action, "restart-unavailable");
+});
+
+test("unregistered future and malformed completion times appear in the attention summary", async () => {
+  const presetStore = {
+    ["/" + S3_KEY_PREFIX + "_HEARTBEAT/future-clock.json"]: JSON.stringify({ last_ok: new Date(Date.now() + 86400000).toISOString() }),
+    ["/" + S3_KEY_PREFIX + "_HEARTBEAT/invalid-clock.json"]: JSON.stringify({ last_ok: "not-a-date" }),
+    ["/" + S3_KEY_PREFIX + "_HEARTBEAT/new-job.json"]: JSON.stringify({ last_event: "start" }),
+  };
+  const r = await runHeartbeat(["check"], { presetStore });
+  assert.equal(r.status, 0, r.stderr);
+  const attention = r.stdout.split("\n").find((line) => line.startsWith("SILENCE = FAILURE:"));
+  assert.ok(attention);
+  assert.match(attention, /future-clock/);
+  assert.match(attention, /invalid-clock/);
+  assert.doesNotMatch(attention, /new-job/);
+  assert.match(r.stdout, /\[NO-DATA\] new-job/);
+});
+
+test("a registered job with a small clock skew remains LIVE without a restart annotation", async () => {
+  const presetStore = {
+    ["/" + S3_KEY_PREFIX + "_HEARTBEAT/brain-reindex.json"]: JSON.stringify({ last_ok: new Date(Date.now() + 30000).toISOString() }),
+  };
+  const r = await runHeartbeat(["check", "--json"], { presetStore });
+  assert.equal(r.status, 0, r.stderr);
+  const row = JSON.parse(r.stdout).find((x) => x.job === "brain-reindex");
+  assert.equal(row.status, "LIVE");
+  assert.equal(row.ageMin, 0);
+  assert.equal(row.autoRestart, undefined);
 });

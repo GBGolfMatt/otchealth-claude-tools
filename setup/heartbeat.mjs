@@ -80,6 +80,16 @@ async function listBeats() {
 // Note this filters the REGISTRY only: `check` also watches every job a beat file names, so a
 // retired job that somehow still beats stays visible instead of being silently ignored.
 export function isWatchedJobKey(key) { return !String(key).startsWith("_"); }
+// Allow at most one minute of producer/observer clock skew, clamped to age zero. A timestamp
+// farther ahead cannot demonstrate health. Read the observation clock after each beat fetch.
+export const HEARTBEAT_CLOCK_SKEW_MS = 60_000;
+export function heartbeatAgeMinutes(lastOk, now) {
+  if (typeof lastOk !== "string" || !Number.isFinite(now)) return null;
+  const parsed = Date.parse(lastOk);
+  if (!Number.isFinite(parsed) || parsed - now > HEARTBEAT_CLOCK_SKEW_MS) return null;
+  return Math.max(0, Math.round((now - parsed) / 60000));
+}
+
 function loadRegistry() {
   try {
     const raw = JSON.parse(readFileSync(join(HERE, "heartbeat-registry.json"), "utf8"));
@@ -158,20 +168,20 @@ if (isMain)
     const files = await listBeats();
     const seen = new Set(files.map((f) => f.replace(/\.json$/, "")));
     const jobs = [...new Set([...Object.keys(reg), ...seen])].sort();
-    const now = Date.now();
     const rows = [];
     for (const job of jobs) {
       const hb = (await getJson(`${job}.json`)) || {};
       const intervalMin = (reg[job] && reg[job].interval_min) || null;
-      const lastOk = hb.last_ok ? Date.parse(hb.last_ok) : null;
-      const ageMin = lastOk ? Math.round((now - lastOk) / 60000) : null;
+      const ageMin = heartbeatAgeMinutes(hb.last_ok, Date.now());
       // No ARM/control-plane signal any more (see header note): status is derived from the self-beat
       // alone. A job that never even started now reads identically to one that started and stopped
       // beating -- both are "DEAD (never)" / "NO-DATA" -- where the pre-port ARM path could once tell
       // those apart. Flagged, not silently narrowed.
       let status;
-      if (!intervalMin && !lastOk) status = "NO-DATA";
-      else if (!lastOk) status = "DEAD";
+      // A present but unusable completion timestamp is actionable even without a registry row.
+      const hasLastOk = hb.last_ok !== undefined && hb.last_ok !== null;
+      if (!intervalMin && ageMin === null && !hasLastOk) status = "NO-DATA";
+      else if (ageMin === null) status = "DEAD";
       else if (intervalMin && ageMin > intervalMin * 3) status = "DEAD"; // 3x = alert
       else if (intervalMin && ageMin > intervalMin) status = "LATE";     // 1x = missing
       else status = "LIVE";
