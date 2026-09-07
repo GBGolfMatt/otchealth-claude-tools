@@ -357,6 +357,21 @@ asserting the pair. `iheartest/qa/release-verification/` is the worked example.
 
 ## Known limits (state these, do not paper over them)
 
+- **What counts as shipped text is decided by content, not extension.** Every
+  file under `webBundle.root` is read and scanned unless it carries a known
+  media/font/archive extension (png, jpg, mp3, mp4, woff, zip, pdf, car, nib,
+  wasm and the like) or its first 8 KiB contains a NUL byte -- git's own
+  binary heuristic. So a `.map` sidecar with the full source in
+  `sourcesContent`, an extensionless `<script src="app">`, a `.webmanifest`
+  or a `.xml` are all scanned. An earlier version scanned only eight blessed
+  extensions and said so nowhere, which let a `mustNotContain` walk straight
+  past a `.map` that shipped the very text it existed to catch.
+- **Every rule name is validated, at both levels.** The four categories
+  (`webBundle`, `capabilityCoupling`, `infoPlist`, `renderedVersion`) and the
+  keys inside them are the only ones accepted; anything else is exit 3 by name.
+  A misspelled category (`capabilitycoupling`, `infoPList`) used to check
+  nothing, print nothing, and let the run report CLEAN -- the quietest false
+  CLEAN there is, because the author believes the rule exists.
 - **Text-scan only.** It reads the shipped web layer as text. It does not
   execute the app, cannot resolve dynamic dispatch, and cannot see a
   privacy API reached from *native* Swift that has no web-layer footprint. For

@@ -118,16 +118,32 @@ function readCentralDirectory(ipa) {
   }
   if (eocd < 0) throw new Error('no end-of-central-directory record: not a zip archive');
   let count = buf.readUInt16LE(eocd + 10);
+  let cdSize = buf.readUInt32LE(eocd + 12);
   let start = buf.readUInt32LE(eocd + 16);
+  let endOfCd = eocd;
   // Zip64: the 32-bit fields saturate and the real values live in the zip64 EOCD.
-  if (count === 0xffff || start === 0xffffffff) {
+  if (count === 0xffff || start === 0xffffffff || cdSize === 0xffffffff) {
     const loc = eocd - 20;
     if (loc < 0 || buf.readUInt32LE(loc) !== 0x07064b50) throw new Error('zip64 archive with no zip64 locator');
     const z64 = Number(buf.readBigUInt64LE(loc + 8));
     if (buf.readUInt32LE(z64) !== 0x06064b50) throw new Error('zip64 end-of-central-directory record not found');
     count = Number(buf.readBigUInt64LE(z64 + 32));
+    cdSize = Number(buf.readBigUInt64LE(z64 + 40));
     start = Number(buf.readBigUInt64LE(z64 + 48));
+    endOfCd = z64;
   }
+  // The EOCD's `start` is an offset from the START OF THE ARCHIVE, and an
+  // archive can carry prepended bytes (a self-extractor stub, a concatenation),
+  // in which case the true central directory sits `cdSize` bytes before the end
+  // record and every stored offset is short by the same delta. Python's
+  // zipfile and Info-ZIP both detect and compensate; this reader used the raw
+  // field (round 33, latent: unzip refuses every such archive first, so no
+  // verdict was reachable, but a reader that disagrees with the extractor it
+  // verifies is one change away from being wrong). Compensate the same way,
+  // and refuse an end record that would overlap its own directory.
+  const actualStart = endOfCd - cdSize;
+  if (actualStart < start) throw new Error('central directory overlaps its end record, so the archive is malformed');
+  if (actualStart > start) start = actualStart; // prepended bytes: shift like zipfile does
   const entries = new Map();
   let p = start;
   for (let n = 0; n < count; n++) {
@@ -992,7 +1008,36 @@ function readShippedText(appDir, subdir) {
     throw new Error(`webBundle.root "${subdir}" resolves through a symlink to ${realRoot}, outside the shipped .app; only bytes from the artifact may inform a verdict`);
   }
 
-  const TEXT = new Set(['.html', '.js', '.mjs', '.cjs', '.json', '.css', '.svg', '.txt']);
+  // What counts as "shipped text"? Decide by CONTENT, not by a blessed extension
+  // list. An earlier version scanned only eight extensions (.html .js .mjs .cjs
+  // .json .css .svg .txt) and documented that nowhere, so a `.map` sidecar
+  // carrying the full unminified source in `sourcesContent`, or an extensionless
+  // script loaded by `<script src="app">`, was never even opened -- and a
+  // mustNotContain rule walked straight past the bytes it existed to catch
+  // (round 33, reproduced on a plain Vite-shaped build). The rule semantics say
+  // a literal match anywhere in shipped text counts, so the walk must read
+  // everything that IS text. Known media/font/archive extensions are skipped
+  // without being read (large, never text); everything else is read and treated
+  // as text unless its first 8 KiB contains a NUL byte -- git's own heuristic,
+  // and therefore the same line a diff viewer draws.
+  const BINARY_EXT = new Set([
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.ico', '.icns',
+    '.mp3', '.m4a', '.aac', '.wav', '.caf', '.mp4', '.m4v', '.mov', '.webm',
+    '.woff', '.woff2', '.ttf', '.otf', '.eot',
+    '.zip', '.gz', '.br', '.pdf', '.car', '.nib', '.storyboardc', '.momd', '.mom',
+    '.db', '.sqlite', '.realm', '.bin', '.wasm',
+  ]);
+  const isShippedText = (name, file) => {
+    if (BINARY_EXT.has(path.extname(name).toLowerCase())) return false;
+    const fd = fs.openSync(file, 'r');
+    try {
+      const head = Buffer.alloc(8192);
+      const n = fs.readSync(fd, head, 0, 8192, 0);
+      return head.subarray(0, n).indexOf(0) === -1;
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
   // Dedupe by RESOLVED identity. An inside-pointing symlink is legitimate and is
   // followed, but without this the same shipped bytes are read through both
   // paths -- which double-counts the "N text files" line and prints the same
@@ -1041,7 +1086,7 @@ function readShippedText(appDir, subdir) {
         if (seen.has(target)) continue;   // also stops a symlink cycle from recursing forever
         seen.add(target);
         walk(target);
-      } else if (TEXT.has(path.extname(e.name).toLowerCase())) {
+      } else if (isShippedText(e.name, target)) {
         if (seen.has(target)) continue;
         seen.add(target);
         files.push({ rel: path.relative(root, abs), text: fs.readFileSync(target, 'utf8') });
@@ -1127,6 +1172,33 @@ const expect = manifest.expect || {};
 // also means a rule missing its required fields fails closed instead of
 // matching nothing and quietly passing.
 const compiled = configError(`validating rules in ${manifestPath}`, () => {
+  // The rule CATEGORY names are validated too, not only the fields inside
+  // them. Field-level typos were already refused (a missing `requirePlistKey`
+  // is exit 3), but a category-level typo -- `capabilitycoupling`,
+  // `infoPList` -- was simply never read: the whole category checked nothing,
+  // printed nothing, and the run reported VERDICT: CLEAN on an artifact the
+  // correctly spelled rule flags (round 33, two reproductions). A rule the
+  // author believes they wrote and that silently does not exist is the
+  // quietest false CLEAN there is, so an unknown key is refused by name.
+  const KNOWN = {
+    expect: ['webBundle', 'capabilityCoupling', 'infoPlist', 'renderedVersion'],
+    webBundle: ['root', 'mustContain', 'mustNotContain'],
+    infoPlist: ['required', 'forbidden', 'equals'],
+    renderedVersion: ['file', 'elementId', 'why'],
+  };
+  const onlyKnown = (where, obj, allowed) => {
+    if (obj === undefined || obj === null) return;
+    if (typeof obj !== 'object' || Array.isArray(obj)) throw new Error(`${where} must be an object`);
+    for (const k of Object.keys(obj)) {
+      if (!allowed.includes(k)) {
+        throw new Error(`${where}.${k} is not a rule this verifier knows (known: ${allowed.join(', ')}). A misspelled rule would check nothing and report CLEAN, so it is refused.`);
+      }
+    }
+  };
+  onlyKnown('expect', expect, KNOWN.expect);
+  onlyKnown('expect.webBundle', expect.webBundle, KNOWN.webBundle);
+  onlyKnown('expect.infoPlist', expect.infoPlist, KNOWN.infoPlist);
+  onlyKnown('expect.renderedVersion', expect.renderedVersion, KNOWN.renderedVersion);
   const patterns = new Map();
   const compile = (where, source) => {
     if (typeof source !== 'string' || source === '') throw new Error(`${where}: pattern must be a non-empty string, got ${JSON.stringify(source)}`);

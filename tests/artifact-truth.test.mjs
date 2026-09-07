@@ -307,7 +307,7 @@ test('a zip with no Payload/ exits 2', () => {
 test('a corrupt Info.plist exits 2, never 0 and never 1', () => {
     // The dangerous outcome is not the crash, it is a plist that parses to
     // nothing and makes every plist rule pass vacuously.
-    const ipa = makeIpa({ rawPlist: 'bplist00   truncated garbage' });
+    const ipa = makeIpa({ rawPlist: 'bplist00\x00\x00 truncated garbage' });
     const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
     const { code, out } = run(ipa, manifest);
     assert.equal(code, 2, out);
@@ -2549,4 +2549,85 @@ test('a hand-built archive whose headers AGREE still reads normally', () => {
     const { code, out } = run(ipa, NO_MIC());
     assert.equal(code, 0, `an honest archive must read clean; got ${code}: ${out}`);
     assert.match(out, /VERDICT: CLEAN/);
+});
+
+// --- round 33: the quietest false CLEANs are the rules that never ran --------
+
+test('a misspelled rule CATEGORY is refused (exit 3), never silently skipped', () => {
+    // `capabilitycoupling` (lowercase c) was never read: the category checked
+    // nothing, printed nothing, and the run reported CLEAN on an artifact the
+    // correctly spelled rule flags. Field-level typos were already refused;
+    // category-level ones were not.
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/share.js': 'if (navigator.share) { shareCard(); }' } });
+    const typo = makeManifest({ capabilitycoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription', why: 'x' }] });
+    const { code, out } = run(ipa, typo);
+    assert.equal(code, 3, `unknown category must be exit 3; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+    assert.match(out, /capabilitycoupling is not a rule/);
+    // Ground truth: the same rule, spelled correctly, fires.
+    const right = makeManifest({ capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription', why: 'x' }] });
+    assert.equal(run(ipa, right).code, 1);
+});
+
+test('a misspelled rule inside a known category is refused too', () => {
+    const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/a.js': 'getUserMedia()' } });
+    const { code, out } = run(ipa, makeManifest({ webBundle: { root: 'public', mustnotcontain: [{ pattern: 'getUserMedia', why: 'x' }] } }));
+    assert.equal(code, 3, `got ${code}: ${out}`);
+    assert.match(out, /webBundle\.mustnotcontain is not a rule/);
+    const { code: c2 } = run(ipa, makeManifest({ infoPList: { required: [{ key: 'NSMicrophoneUsageDescription', why: 'x' }] } }));
+    assert.equal(c2, 3, 'infoPList (capital L) must be refused');
+});
+
+test('shipped text is decided by content: a .map sidecar and an extensionless script are scanned', () => {
+    // A default bundler build ships app.min.js.map with the full unminified
+    // source in sourcesContent. The minified file is obfuscated so the literal
+    // cannot match it; the readable source is genuinely shipped, in the web
+    // root, as text -- just not under one of the eight blessed extensions.
+    const ipa = makeIpa({
+        plist: BASE_PLIST,
+        web: {
+            'index.html': '<script src="app.min.js"></script><script src="boot"></script>',
+            'app.min.js': '!function(){var a=navigator;a["sh"+"are"]&&a["sh"+"are"]({title:"x"})}();',
+            'app.min.js.map': JSON.stringify({ version: 3, sources: ['share.js'], sourcesContent: ['if (navigator.share) { shareCard(); }\n'], mappings: '' }),
+            'boot': 'navigator.mediaDevices.getUserMedia({audio:true});',
+        },
+    });
+    const { code, out } = run(ipa, makeManifest({
+        webBundle: { root: 'public', mustNotContain: [{ pattern: 'getUserMedia', why: 'no mic' }] },
+        capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription', why: 'x' }],
+    }));
+    assert.equal(code, 1, `both the .map and the extensionless file must be scanned; got ${code}: ${out}`);
+    assert.match(out, /getUserMedia/);
+    assert.match(out, /app\.min\.js\.map/);
+    assert.match(out, /\bboot\b/);
+});
+
+test('a binary file is skipped by content even without a known extension, and never crashes the walk', () => {
+    const blob = Buffer.concat([Buffer.from([0x89, 0x50, 0x00, 0x01]), Buffer.from('getUserMedia'), Buffer.alloc(64, 0)]);
+    const dir = tmp('bin');
+    const ipa = (() => {
+        const appDir = path.join(dir, 'Payload', 'App.app');
+        fs.mkdirSync(path.join(appDir, 'public'), { recursive: true });
+        fs.writeFileSync(path.join(appDir, 'Info.plist'), plistXml(BASE_PLIST));
+        fs.writeFileSync(path.join(appDir, 'public', 'thing.dat'), blob);
+        fs.writeFileSync(path.join(appDir, 'public', 'index.html'), '<p>ok</p>');
+        const out = path.join(dir, 'App.ipa');
+        execFileSync('zip', ['-q', '-r', out, 'Payload'], { cwd: dir });
+        return out;
+    })();
+    const { code, out } = run(ipa, makeManifest({ webBundle: { root: 'public', mustNotContain: [{ pattern: 'getUserMedia', why: 'x' }] } }));
+    assert.equal(code, 0, `a NUL-bearing blob is not shipped text; got ${code}: ${out}`);
+    assert.match(out, /1 text files/);
+});
+
+test('an archive with prepended bytes never yields a verdict', () => {
+    // Info-ZIP refuses these ("extra bytes at beginning") and so must we; the
+    // central-directory reader now compensates like zipfile does, so if the
+    // extractor ever stops refusing, the two still agree instead of diverging.
+    const good = handBuiltZip([{ name: 'Payload/App.app/Info.plist', data: POC_PLIST }, { name: 'Payload/App.app/public/app.js', data: SAFE }]);
+    const pre = path.join(tmp('pre'), 'App.ipa');
+    fs.writeFileSync(pre, Buffer.concat([Buffer.from('#!/bin/sh\nexit 0\n'), fs.readFileSync(good)]));
+    const { code, out } = run(pre, NO_MIC());
+    assert.notEqual(code, 0, `prepended bytes must not produce CLEAN; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
 });
