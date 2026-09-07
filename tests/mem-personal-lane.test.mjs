@@ -28,3 +28,15 @@ test("mem CLI rejects cross-lane access out of clo-personal before credential or
   assert.match(result.stderr, /cross-lane access involving clo-personal is prohibited/);
   assert.doesNotMatch(result.stderr, /credential|storage account|s3 get/i);
 });
+
+test("mem CLI requires a writer before opening an explicitly targeted lane", () => {
+  const result = spawnSync(process.execPath, [mem, "entity", "list", "--on", "clo-personal", "--share"], {
+    encoding: "utf8",
+    timeout: 5000,
+    env: { ...process.env, BLOB_BACKEND: "s3" },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /writer identity is required before target lane access/);
+  assert.doesNotMatch(result.stderr, /credential|storage account|s3 get/i);
+  assert.equal(result.stdout, "");
+});
