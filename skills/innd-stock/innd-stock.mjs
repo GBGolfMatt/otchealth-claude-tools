@@ -51,7 +51,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getBufferFromS3, putObjectToS3 } from "../kb-memory/s3-blob.mjs";
-import { publishPriceRail } from "./publish-price-rail.mjs";
+import { publishPriceRail, PRICE_RAIL_ACCOUNT as S3_ACCOUNT, PRICE_RAIL_CONTAINER as S3_CONTAINER, PRICE_RAIL_FILE as S3_BLOB } from "./publish-price-rail.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Lazy-install xlsx if missing (skill is dependency-light otherwise).
@@ -91,10 +91,6 @@ function splitFactor(date){
 // otchealth-finance-legal-dr-55c84f6b/otchealthcfodata/innd-stock/); the blob name is unprefixed
 // (relative to that mirror's own keyPrefix), confirmed against a real read-only listing that already
 // shows the evacuated workbook sitting at this exact key.
-const S3_ACCOUNT = "otchealthcfodata";
-const S3_CONTAINER = "innd-stock";
-const S3_BLOB = "INND-daily-stock-history.xlsx";
-const XLSX_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 // STORAGE_BACKEND is no longer a real choice (there is only one backend left), but a stale env value
 // left over from the Azure-era job definition (STORAGE_BACKEND=azure) must fail LOUD, not be silently
 // ignored -- an operator seeing "it worked" after setting a now-meaningless flag is exactly the kind of

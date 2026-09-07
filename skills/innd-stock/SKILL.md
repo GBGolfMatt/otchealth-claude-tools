@@ -44,6 +44,9 @@ per-row source and coverage before using a run for a source-specific valuation.
 
 ## Execution
 
+The dated observations below were rechecked through AWS on 2026-09-07 at 19:53 UTC.
+See [the repair receipt](REPAIR-RECEIPT-20260907.md) for API names, results and test evidence.
+
 The existing AWS EventBridge schedule `otchealth-innd-stock-daily` runs at
 22:30 UTC Monday through Friday and launches the ECS stock job. The script is
 baked into the doc-indexer image. Build and deploy a reviewed immutable image to

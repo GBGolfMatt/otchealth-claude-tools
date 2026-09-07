@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export const PRICE_RAIL_ACCOUNT = 'otchealthcfodata';
+export const PRICE_RAIL_CONTAINER = 'innd-stock';
 export const PRICE_RAIL_FILE = 'INND-daily-stock-history.xlsx';
 export const PRICE_RAIL_MIRROR = `innd-stock/${PRICE_RAIL_FILE}`;
 export const PRICE_RAIL_SIDECAR = `_TEXT/${PRICE_RAIL_MIRROR}.txt`;
@@ -16,7 +17,7 @@ export async function publishPriceRail({ workbook, extractedText, put, get }) {
   const sha256 = digest(workbook);
   const text = Buffer.from(`Source workbook SHA256: ${sha256}\n\n${extractedText}`, 'utf8');
   const objects = [
-    ['innd-stock', PRICE_RAIL_FILE, workbook, XLSX_TYPE],
+    [PRICE_RAIL_CONTAINER, PRICE_RAIL_FILE, workbook, XLSX_TYPE],
     ['cfo-source-docs', PRICE_RAIL_MIRROR, workbook, XLSX_TYPE],
     ['cfo-source-docs', PRICE_RAIL_SIDECAR, text, 'text/plain; charset=utf-8'],
   ];
