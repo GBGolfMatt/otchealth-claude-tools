@@ -1,0 +1,123 @@
+{
+  "scope": "Infrastructure metadata only. No finance documents or credential values.",
+  "mapping_source": {
+    "repo": "InnerScopeHearing/otchealth-claude-tools",
+    "ref": "50f56a49ef4e03c4062cb9b9bc560c413536d6b6",
+    "path": "skills/kb-memory/s3-blob.mjs",
+    "rows": {
+      "otchealthcfodata/innd-stock": {
+        "bucket": "otchealth-finance-legal-dr-55c84f6b",
+        "keyPrefix": "otchealthcfodata/innd-stock/"
+      },
+      "otchealthcfodata/cfo-source-docs": {
+        "bucket": "otchealth-finance-legal-dr-55c84f6b",
+        "keyPrefix": "otchealthcfodata/cfo-source-docs/"
+      }
+    }
+  },
+  "aws_schedule_task_output": {
+    "status": "success",
+    "stdout": "",
+    "return_value": {
+      "observed_utc": "2026-09-07T19:53:47.746984+00:00",
+      "schedule": {
+        "name": "otchealth-innd-stock-daily",
+        "state": "ENABLED",
+        "expression": "cron(30 22 ? * MON-FRI *)",
+        "timezone": "UTC"
+      },
+      "task": {
+        "definition": "arn:aws:ecs:us-east-1:900915535335:task-definition/otchealth-job-innd-stock-daily:5",
+        "task_role": "arn:aws:iam::900915535335:role/otchealthTaskRole",
+        "image": "900915535335.dkr.ecr.us-east-1.amazonaws.com/doc-indexer:latest",
+        "command": [
+          "/app/setup/with-heartbeat.sh",
+          "innd-stock-daily",
+          "--",
+          "node",
+          "/app/skills/innd-stock/innd-stock.mjs",
+          "update"
+        ],
+        "secret_bindings": [
+          {
+            "name": "MASSIVE_API_KEY",
+            "provider": "ssm"
+          },
+          {
+            "name": "MASSIVE_API_KEY_2",
+            "provider": "ssm"
+          }
+        ]
+      }
+    },
+    "api_calls": [
+      {
+        "service": "scheduler",
+        "operation": "GetSchedule",
+        "status": "success"
+      },
+      {
+        "service": "ecs",
+        "operation": "DescribeTaskDefinition",
+        "status": "success",
+        "n_items": {
+          "tags": 0
+        }
+      }
+    ]
+  },
+  "aws_headobject_output": {
+    "status": "success",
+    "stdout": "",
+    "return_value": {
+      "objects": [
+        {
+          "key": "otchealthcfodata/innd-stock/INND-daily-stock-history.xlsx",
+          "bytes": 1696359,
+          "modified": "2026-09-04T22:30:50+00:00",
+          "versionId": "DJ6HykKGLX5nEF3HdWxr7MsNBh0jCmGs",
+          "etag": "\"2123094f82b0f7743dab43186fb691e8\"",
+          "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        },
+        {
+          "key": "otchealthcfodata/cfo-source-docs/innd-stock/INND-daily-stock-history.xlsx",
+          "bytes": 1661033,
+          "modified": "2026-08-13T22:15:39+00:00",
+          "versionId": "V07rESrX_k1u63ZzNwjFPQv2OPZ2R_l.",
+          "etag": "\"febc708364a48465c528d8cd01fecedc\"",
+          "contentType": "application/octet-stream"
+        },
+        {
+          "key": "otchealthcfodata/cfo-source-docs/_TEXT/innd-stock/INND-daily-stock-history.xlsx.txt",
+          "bytes": 581497,
+          "modified": "2026-08-13T22:13:10+00:00",
+          "versionId": "0df2Nr1K2s4dS7PfPIBH_iDxXpWBcakJ",
+          "etag": "\"b92122613111f2a154f83d321d7951fb\"",
+          "contentType": "application/octet-stream"
+        }
+      ]
+    },
+    "api_calls": [
+      {
+        "service": "s3",
+        "operation": "HeadObject",
+        "status": "success"
+      },
+      {
+        "service": "s3",
+        "operation": "HeadObject",
+        "status": "success"
+      },
+      {
+        "service": "s3",
+        "operation": "HeadObject",
+        "status": "success"
+      }
+    ]
+  },
+  "limitations": [
+    "API observations are dated, not a claim this PR is deployed.",
+    "S3 HeadObject does not prove content SHA256, CFO authorization, or search visibility.",
+    "Publication helper readbacks prove bytes under the job's credentials only. CFO exact-path acceptance remains required."
+  ]
+}

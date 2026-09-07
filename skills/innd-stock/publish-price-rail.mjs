@@ -10,7 +10,8 @@ const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 // Publish only the public-price workbook to the existing finance room. No commons,
 // personal records, new credentials, or changes to the price calculation are involved.
-// Read back every object so a successful task means that CFO readers can see it.
+// Read back every object to prove byte integrity using the job's credentials.
+// This does not verify CFO authorization or search visibility; those need CFO acceptance.
 export async function publishPriceRail({ workbook, extractedText, put, get }) {
   if (!Buffer.isBuffer(workbook) || workbook.length === 0) throw new Error('price_rail_empty_workbook');
   if (typeof extractedText !== 'string' || !extractedText.trim()) throw new Error('price_rail_empty_text');

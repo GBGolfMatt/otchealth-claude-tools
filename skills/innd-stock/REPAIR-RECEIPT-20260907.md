@@ -58,3 +58,16 @@ existing stock status tests. The index-writer and silent-success gates passed.
 This receipt-only follow-up changes no implementation or test code after that
 verified commit. The prompt-comparison job still lacked scorecards and is not
 claimed as a passed comparison. Production deployment remains outstanding.
+
+## Routing and readback evidence
+
+[REPAIR-EVIDENCE-20260907.json](REPAIR-EVIDENCE-20260907.json) preserves the
+observed AWS API output and pins the existing MIRROR configuration source at
+50f56a49ef4e03c4062cb9b9bc560c413536d6b6. These are configuration and object-metadata
+observations, not CFO authorization tests. The helper proves byte integrity using
+the job's credentials only. CFO access and index visibility require a separate
+CFO exact-path read. No permission expansion is part of this repair.
+
+Receipt commit 5ff7b1d08676ae866d29e271d155d3f61e8f0b7f passed the
+[tests workflow 34157701763](https://github.com/InnerScopeHearing/otchealth-claude-tools/actions/runs/34157701763).
+This follow-up changes comments and evidence only. Run final-head CI before merge.

@@ -1,6 +1,6 @@
 ---
 name: innd-stock
-description: Maintains the internal CFO INND price workbook on AWS S3 and publishes a verified finance-room copy plus searchable text.
+description: Maintains the internal CFO INND price workbook on AWS S3 and publishes a finance-room copy plus text with task-role byte-integrity checks.
 ---
 
 # INND daily stock-price history
@@ -18,9 +18,12 @@ After each update, publish the identical workbook into the existing finance data
 Its text sidecar is
 `cfo-source-docs/_TEXT/innd-stock/INND-daily-stock-history.xlsx.txt`.
 
-All objects stay in the existing finance-legal S3 bucket. Nothing enters commons.
-The publication helper reads every object back and compares its SHA256 before
-reporting success. The text includes the source workbook SHA256. A failed mirror
+The existing [MIRROR configuration](https://github.com/InnerScopeHearing/otchealth-claude-tools/blob/50f56a49ef4e03c4062cb9b9bc560c413536d6b6/skills/kb-memory/s3-blob.mjs) maps both account/container pairs to the same finance-legal S3 bucket.
+The exact mapping and dated API output are in [the evidence file](REPAIR-EVIDENCE-20260907.json).
+Nothing enters commons.
+The publication helper reads every object back with the job's credentials and
+compares its SHA256 before reporting object-integrity success. It does not prove
+CFO authorization or search visibility; the CFO exact-path read remains required. The text includes the source workbook SHA256. A failed mirror
 write or readback fails the job; retrying repairs incomplete publication.
 This is a sequence of verified object writes, not an atomic multi-object transaction.
 Search-index refresh remains separate from sidecar creation.
