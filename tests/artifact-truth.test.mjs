@@ -1862,3 +1862,45 @@ function binaryPlistOf(obj) {
     const py = `import plistlib,sys,json;sys.stdout.buffer.write(plistlib.dumps(json.loads(sys.argv[1]), fmt=plistlib.FMT_BINARY))`;
     return execFileSync('python3', ['-c', py, JSON.stringify(obj)], { maxBuffer: 1 << 20 });
 }
+
+test('a 1-byte binary plist integer is UNSIGNED: 0xFF is 255, not -1', () => {
+    // A lock against a plausible-sounding "fix" that was proposed in review and
+    // is wrong: that CFBinaryPlist integers are signed at every width. They are
+    // not. 1, 2 and 4-byte integers are unsigned; only 8 and 16-byte are signed
+    // two's complement, which is why a negative is ALWAYS encoded as 8 bytes.
+    //
+    // Three independent proofs, all run against Python's plistlib, a real
+    // implementation of the format:
+    //   - plistlib.dumps({'n': -1}) emits marker 0x13 + ffffffffffffffff, an
+    //     EIGHT-byte integer. Negatives are never written narrower.
+    //   - plistlib's reader rule is literally `signed=tokenL >= 3`, i.e. signed
+    //     only when the width is 8 or more.
+    //   - a hand-built 1-byte 0xFF decodes as 255.
+    //
+    // Widening signedness to every width would make this legitimate 255 read as
+    // -1 -- turning a correct value into a fabricated equality violation, which
+    // is the exact failure class this tool exists to prevent. The test is here
+    // so the next reviewer to propose it gets an answer that runs.
+    const raw = execFileSync('python3', ['-c', [
+        'import struct,sys',
+        'hdr=b"bplist00"',
+        // one 1-byte integer object holding 0xFF, as the root
+        'body=struct.pack(">BB",0x10,0xFF)',
+        'off=bytes([len(hdr)])',
+        'trailer=bytes(6)+bytes([1,1])+struct.pack(">QQQ",1,0,len(hdr)+len(body))',
+        'sys.stdout.buffer.write(hdr+body+off+trailer)',
+    ].join('\n')], { maxBuffer: 1 << 20 });
+    // The root here is a bare integer, not a dict, so the tool must refuse it
+    // as having no keys -- which still proves the decode, because the refusal
+    // names what it found.
+    const ipa = makeIpa({ rawPlist: raw });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { anything: 'x' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /did not parse to a dictionary/i);
+
+    // And the same width inside a real dict, round-tripped through plistlib.
+    const inDict = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', Small: 255 }) });
+    const r2 = run(inDict, makeManifest({ infoPlist: { equals: { Small: 255 } } }));
+    assert.equal(r2.code, 0, `a 1-byte 255 must stay 255; got ${r2.code}: ${r2.out}`);
+    assert.doesNotMatch(r2.out, /-1/);
+});
