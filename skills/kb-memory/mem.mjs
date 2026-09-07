@@ -616,6 +616,9 @@ const currentEntity = (rows, k) => rows.filter((r) => r.type === "entity" && r.e
 
 async function entityCmd() {
   const sub = (positional[0] || "").toLowerCase();
+  // Alias routing controls deterministic recall. Refuse cross-lane alias changes before opening the
+  // target store, so a caller cannot read a protected lane or append a row that wins by timestamp.
+  if (sub === "alias") assertAliasOwner(AGENT, ON);
   await initStore();
   const rows = await load();
   if (sub === "get") {
@@ -638,9 +641,6 @@ async function entityCmd() {
   if (sub === "alias") {
     const from = normKey(positional[1] || ""), to = normKey(positional[2] || "");
     if (!from || !to) { console.error('usage: mem.mjs entity alias "<from-phrasing>" <to-canonical-key> --agent <a> [--source "..."] [--share]'); process.exit(2); }
-    // Alias routing controls deterministic recall. Only the target lane owner may change it:
-    // a cross-lane append without a supersedes pointer could still win latest-by-timestamp lookup.
-    assertAliasOwner(AGENT, ON);
     let fromRef, toRef, prevRef;
     const { entry } = await commitAppend((freshRows) => {
       fromRef = normKey(positional[1] || "");
