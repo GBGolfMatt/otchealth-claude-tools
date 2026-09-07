@@ -44,6 +44,9 @@ import { translate } from "./pg-sql-translate.mjs";
 // CONTAINERS set -- a caller-supplied container string must never reach SQL un-validated.
 const CONTAINERS = new Set(["decisions_pending", "signals"]);
 const ID_RE = /^[A-Za-z0-9_.\-]{1,255}$/;
+// Signal IDs already use detector::subject for stable cooldown/history identity. They are bound
+// SQL values, not identifiers. Keep the existing stricter charset for partition keys and decisions.
+const SIGNAL_ID_RE = /^[A-Za-z0-9_.:\-]{1,255}$/;
 
 /** Container -> physical table, prefixed exactly like the gateway's postgres.ts tableFor() so the two
  *  new tables sit in the SAME agentstate_* naming convention as the gateway's own tables in the same
@@ -53,10 +56,14 @@ export function tableFor(coll) {
   return `agentstate_${coll}`;
 }
 
-function assertId(value, label = "id") {
-  if (typeof value !== "string" || !ID_RE.test(value) || /^\.+$/.test(value)) {
+function assertId(value, label = "id", pattern = ID_RE) {
+  if (typeof value !== "string" || !pattern.test(value) || /^\.+$/.test(value)) {
     throw new Error(`invalid ${label} (must match the agent-state id charset)`);
   }
+}
+
+function assertDocId(coll, id) {
+  assertId(id, "id", coll === "signals" ? SIGNAL_ID_RE : ID_RE);
 }
 
 // ---- connection config -------------------------------------------------------------------------
@@ -100,13 +107,21 @@ async function getConn() {
   return _conn;
 }
 
+/** Close the CLI-owned connection after all work settles. A referenced PostgreSQL socket
+ * otherwise keeps Node alive after a successful scan/sweep and leaks one server slot per cron.
+ * Idempotent; does not resolve credentials or connect when nothing was opened. */
+export async function closeConnection() {
+  const conn = _conn;
+  _conn = null;
+  if (conn) await conn.end();
+}
+
 /** Test-only: drop the memoized config + connection so a test can point this module at a different
  *  (scratch/local) Postgres instance without cross-contaminating another test's state. Mirrors
  *  cosmos-auth.mjs's _resetAadTokenCacheForTests() -- same purpose, same naming convention. A no-op
  *  in any real call path; nothing here is invoked by createDoc/readDoc/etc. */
 export async function _resetForTests() {
-  if (_conn) { try { await _conn.end(); } catch { /* best-effort */ } }
-  _conn = null;
+  try { await closeConnection(); } catch { /* best-effort */ }
   _cfg = undefined;
 }
 
@@ -123,7 +138,7 @@ export async function createDoc(coll, pkValue, doc) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
   const id = String(doc.id ?? "");
-  assertId(id);
+  assertDocId(coll, id);
   const etag = newEtag();
   const conn = await getConn();
   try {
@@ -143,7 +158,7 @@ export async function createDoc(coll, pkValue, doc) {
 export async function readDoc(coll, pkValue, id) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
-  assertId(id);
+  assertDocId(coll, id);
   const conn = await getConn();
   const r = await conn.query(`SELECT doc, etag FROM ${table} WHERE pk = $1 AND id = $2`, [pkValue, id]);
   if (!r.rows.length) return null;
@@ -164,7 +179,7 @@ export async function readDoc(coll, pkValue, id) {
 export async function replaceDoc(coll, pkValue, id, doc, ifMatch) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
-  assertId(id);
+  assertDocId(coll, id);
   const etag = newEtag();
   const conn = await getConn();
   const r = await conn.query(
@@ -191,7 +206,7 @@ export async function upsertDoc(coll, pkValue, doc) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
   const id = String(doc.id ?? "");
-  assertId(id);
+  assertDocId(coll, id);
   const etag = newEtag();
   const conn = await getConn();
   await conn.query(
