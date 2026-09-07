@@ -281,6 +281,23 @@ stays correct if the substitution mechanism is ever rewritten. **Assert what
 the user sees, not how the build produces it** — a good general rule for any
 artifact check.
 
+That promise was FALSE for as long as the rule existed, and it took thirty
+adversarial rounds to surface. The match ran against the raw HTML and used
+`.match()` without `/g`, so it found the FIRST occurrence of the id anywhere in
+the file — including inside a comment. A leftover template comment holding the
+correct string, above a live element rendering a stale one, produced
+`VERDICT: CLEAN` over exactly the defect this rule exists to catch; reversed, a
+stale comment above a correct element fabricated a violation. Comments in a
+built `index.html` are ordinary, not contrived: merges and template scaffolding
+leave them behind constantly.
+
+The promise is now backed by the code rather than asserted over it. Comments are
+stripped before the search, every occurrence is collected rather than the first,
+and two live elements sharing the id is reported as ambiguous instead of
+resolved by picking one — a duplicate id is invalid HTML, the browser renders
+the first and a script querying it may find either, so which one the user sees
+is genuinely unknown.
+
 ## Adding an app
 
 1. Download its shipped IPA.

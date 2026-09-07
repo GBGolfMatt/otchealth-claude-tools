@@ -252,8 +252,20 @@ function parseXmlPlist(text) {
     const close = body.startsWith('/');
     const selfClose = body.endsWith('/');
     if (close && selfClose) fail(`has the malformed element <${body}>`);
-    const name = (close ? body.slice(1) : body).replace(/\/$/, '').trim().split(/\s/)[0];
+    // Validate the WHOLE tag, not just its first token. This used to
+    // `.split(/\s/)[0]` and discard the rest, so `</string junk>` parsed as an
+    // ordinary closing tag and the document produced a verdict -- while
+    // ElementTree rejects that same file as not well-formed. Anything after the
+    // name must be well-formed attributes (and a closing tag may carry none).
+    const inner = (close ? body.slice(1) : body).replace(/\/$/, '');
+    const name = inner.trim().split(/\s/)[0];
     if (!/^[A-Za-z_][\w.:-]*$/.test(name)) fail(`has the malformed element <${body}>`);
+    const rest = inner.slice(inner.indexOf(name) + name.length);
+    if (close) {
+      if (rest.trim() !== '') fail(`has the malformed closing tag <${body}>: a closing tag carries no attributes`);
+    } else if (!/^(?:\s+[A-Za-z_:][\w.:-]*\s*=\s*(?:"[^"]*"|'[^']*'))*\s*$/.test(rest)) {
+      fail(`has the malformed element <${body}>: what follows the name is not well-formed attributes`);
+    }
     return { close, selfClose, name };
   };
 
@@ -349,6 +361,15 @@ function parseXmlPlist(text) {
         if (t.selfClose) fail(`has a self-closing <${t.name}/>, which carries no value`);
         const raw = readText().trim();
         expectClose(t.name);
+        // <integer> means an integer. Number() accepts '1.5' and '1e3' and
+        // even '0x10', so the type in the document and the value handed back
+        // could disagree while the run still reported a verdict.
+        if (t.name === 'integer' && !/^[+-]?\d+$/.test(raw)) {
+          fail(`has <integer>${raw}</integer>, which is not an integer`);
+        }
+        if (t.name === 'real' && !/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) {
+          fail(`has <real>${raw}</real>, which is not a real number`);
+        }
         const n = Number(raw);
         if (raw === '' || !Number.isFinite(n)) fail(`has <${t.name}>${raw}</${t.name}>, which is not a number`);
         return n;
@@ -369,7 +390,14 @@ function parseXmlPlist(text) {
         if (t.selfClose) return Buffer.alloc(0);
         const raw = readText();
         expectClose('data');
-        return Buffer.from(raw.replace(/\s+/g, ''), 'base64');
+        // Buffer.from(..., 'base64') silently DISCARDS characters it does not
+        // recognise, so garbage decoded to a shorter buffer and the run carried
+        // on with bytes the document does not contain.
+        const b64 = raw.replace(/\s+/g, '');
+        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(b64)) {
+          fail('has a <data> element whose contents are not valid base64');
+        }
+        return Buffer.from(b64, 'base64');
       }
       case 'array': {
         const arr = [];
@@ -580,7 +608,15 @@ function parseBinaryPlist(buf) {
       const n = 1 << low;
       if (n !== 4 && n !== 8) throw new Error(`binary plist real claims ${n} bytes, which is neither a float nor a double`);
       need(pos + 1, n, 'real');
-      return n === 4 ? buf.readFloatBE(pos + 1) : buf.readDoubleBE(pos + 1);
+      const r = n === 4 ? buf.readFloatBE(pos + 1) : buf.readDoubleBE(pos + 1);
+      // The XML reader already refuses a non-finite <real>; this one did not,
+      // so NaN and Infinity came back as values. describePlistValue has no
+      // branch for them, JSON.stringify(NaN) is the string "null", and a
+      // violation message then reported a present, non-null value as `null` --
+      // the same fabricated-null shape that the `return null` bug produced,
+      // arriving through a different door.
+      if (!Number.isFinite(r)) throw new Error('binary plist holds a real that is NaN or Infinity, which no Info.plist value is');
+      return r;
     }
     if (high === 0x3) {
       // A date is marker 0x33 exactly -- the low nibble is not a length here,
@@ -789,13 +825,35 @@ function readShippedText(appDir, subdir) {
 // as a generic nonzero would say the artifact is bad when the truth is that we
 // never managed to look at it. Those are different facts and a release gate has
 // to keep them apart.
+// --json promises machine-readable output, and on exits 2 and 3 it produced
+// none: both handlers wrote prose to stderr and exited before the JSON writer
+// at the bottom of the file was ever reached. A CI wrapper doing
+// JSON.parse(stdout) -- a fair reading of "machine-readable" -- got a parse
+// error on empty input, on exactly the two exit codes where a machine consumer
+// most needs structure. The prose still goes to stderr for a human; the
+// envelope goes to stdout for the caller.
+function bail(kind, code, what, e, tail) {
+  console.error(`${kind}: ${what}: ${e && e.message}`);
+  console.error(tail);
+  if (asJson) {
+    console.log(JSON.stringify({
+      verdict: code === 2 ? 'ARTIFACT_UNREADABLE' : 'VERIFIER_MISCONFIGURED',
+      exitCode: code,
+      stage: what,
+      error: (e && e.message) || String(e),
+      passes: [],
+      violations: [],
+      notes: [],
+    }, null, 2));
+  }
+  process.exit(code);
+}
+
 function inspect(what, fn) {
   try {
     return fn();
   } catch (e) {
-    console.error(`ARTIFACT UNREADABLE: ${what}: ${e && e.message}`);
-    console.error('Failing with exit 2. Being unable to inspect is never reported as clean, and never as a violation either.');
-    process.exit(2);
+    bail('ARTIFACT UNREADABLE', 2, what, e, 'Failing with exit 2. Being unable to inspect is never reported as clean, and never as a violation either.');
   }
 }
 
@@ -814,9 +872,7 @@ function configError(what, fn) {
   try {
     return fn();
   } catch (e) {
-    console.error(`VERIFIER MISCONFIGURED: ${what}: ${e && e.message}`);
-    console.error('Failing with exit 3. The artifact was never opened, so this says nothing about the build.');
-    process.exit(3);
+    bail('VERIFIER MISCONFIGURED', 3, what, e, 'Failing with exit 3. The artifact was never opened, so this says nothing about the build.');
   }
 }
 
@@ -878,7 +934,7 @@ const compiled = configError(`validating rules in ${manifestPath}`, () => {
     // construction outside inspect() (exit 1, claiming the artifact was at
     // fault), and any id containing regex metacharacters could quietly match
     // the wrong element.
-    patterns.set(RENDERED_VERSION_KEY, new RegExp(`<[^>]*\\bid\\s*=\\s*["']${escapeForRegExp(id)}["'][^>]*>([^<]*)<`));
+    patterns.set(RENDERED_VERSION_KEY, new RegExp(`<[^>]*\\bid\\s*=\\s*["']${escapeForRegExp(id)}["'][^>]*>([^<]*)<`, 'g'));
   }
   return patterns;
 });
@@ -1196,7 +1252,38 @@ if (expect.renderedVersion) {
     // runtime by client-side rendering cannot be seen here and the rule should
     // not be declared for such an app.
     const id = expect.renderedVersion.elementId;
-    const m = idxFile.text.match(compiled.get(RENDERED_VERSION_KEY));
+    // Strip HTML comments BEFORE searching, and take every match rather than
+    // the first. Both halves were load-bearing and both were missing, and
+    // SKILL.md promised the opposite in the sentence justifying this rule's
+    // whole design: "cannot be tripped by a comment, cannot be satisfied by a
+    // placeholder". It could be tripped by a comment, in both directions.
+    //
+    // Reproduced. A commented-out template line holding the CORRECT string,
+    // above a real element rendering `v1.5.0-STALE-BUG` against a 1.6.0 binary,
+    // printed VERDICT: CLEAN -- a false clean over exactly the defect this rule
+    // exists to catch, because `.match()` without /g returns the FIRST
+    // occurrence and the comment came first. Reversed, a stale comment above a
+    // correct element fabricated "version tag renders v1.5.0". Comments in a
+    // built index.html are ordinary: merges and template scaffolding leave them
+    // behind constantly.
+    //
+    // Two matches after stripping comments is not something to resolve by
+    // picking one. A duplicate id is invalid HTML, the browser renders the
+    // first and scripts that query it may find either, so which one "the
+    // version tag" means is genuinely ambiguous -- and guessing is what this
+    // tool refuses to do everywhere else.
+    const htmlWithoutComments = idxFile.text.replace(/<!--[\s\S]*?-->/g, '');
+    const rx = compiled.get(RENDERED_VERSION_KEY);
+    rx.lastIndex = 0;
+    const all = [...htmlWithoutComments.matchAll(rx)];
+    if (all.length > 1) {
+      violations.push({
+        rule: 'renderedVersion',
+        detail: `${idxFile.rel} contains ${all.length} elements with id "${id}" (outside comments), rendering ${JSON.stringify(all.map((x) => x[1].trim()))}`,
+        why: 'a duplicate id is invalid HTML and makes "the version tag" ambiguous: the browser renders the first and a script querying it may find either, so this rule cannot say which one the user sees',
+      });
+    }
+    const m = all[0] || null;
     const rendered = m ? m[1].trim() : null;
     const want = `v${describePlistValue(plistGet('CFBundleShortVersionString'))}`;
     if (rendered === want) passes.push(`rendered version tag "${rendered}" matches the binary`);

@@ -2124,3 +2124,133 @@ test('an escaped ampersand and a literal one inside CDATA both still work', () =
     const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: 'Tom & Jerry  & Spike 50 > 40' } } }));
     assert.equal(code, 0, out);
 });
+
+// --- renderedVersion was comment-blind, in BOTH directions -----------------
+// The worst defect found in thirty review rounds, and it sat on original
+// surface the whole time. SKILL.md justifies this rule with the sentence
+// "cannot be tripped by a comment, cannot be satisfied by a placeholder" -- and
+// it could be tripped by a comment, because the match ran against the raw HTML
+// and `.match()` without /g returns the FIRST occurrence.
+
+const RV_PLIST = () => binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.6.0', CFBundleVersion: '59' });
+const RV_MANIFEST = () => makeManifest({ webBundle: { root: 'public' }, renderedVersion: { file: 'index.html', elementId: 'app-version-tag' } });
+
+test('a comment holding the right version cannot mask a wrong rendered one', () => {
+    // The false CLEAN. The page really renders v1.5.0-STALE-BUG against a 1.6.0
+    // binary -- exactly the defect this rule exists to catch -- and a leftover
+    // template comment above it carried the correct string.
+    const ipa = makeIpa({
+        rawPlist: RV_PLIST(),
+        web: { 'index.html': '<!-- template reference: <span id="app-version-tag">v1.6.0</span> -->\n<span id="app-version-tag">v1.5.0-STALE-BUG</span>' },
+    });
+    const { code, out } = run(ipa, RV_MANIFEST());
+    assert.equal(code, 1, `a commented-out correct value must not mask a wrong live one; got ${code}: ${out}`);
+    assert.match(out, /renders "v1\.5\.0-STALE-BUG"/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('a stale comment cannot fabricate a violation about a correct page', () => {
+    // The mirror. Same root cause, opposite damage.
+    const ipa = makeIpa({
+        rawPlist: RV_PLIST(),
+        web: { 'index.html': '<!-- old marker, left for reference: <span id="app-version-tag">v1.5.0</span> -->\n<span id="app-version-tag">v1.6.0</span>' },
+    });
+    const { code, out } = run(ipa, RV_MANIFEST());
+    assert.equal(code, 0, `the live element is correct; got ${code}: ${out}`);
+    assert.match(out, /matches the binary/);
+});
+
+test('two elements with the version id are reported as ambiguous, not guessed', () => {
+    // A duplicate id is invalid HTML: the browser renders the first and a script
+    // querying it may find either, so which one "the version tag" means is
+    // genuinely unknown. Guessing is what this tool refuses to do everywhere
+    // else, so it refuses here too.
+    const ipa = makeIpa({
+        rawPlist: RV_PLIST(),
+        web: { 'index.html': '<span id="app-version-tag">v1.6.0</span>\n<span id="app-version-tag">v9.9.9</span>' },
+    });
+    const { code, out } = run(ipa, RV_MANIFEST());
+    assert.equal(code, 1, out);
+    assert.match(out, /contains 2 elements with id "app-version-tag"/);
+});
+
+// --- the XML reader validated the first token of a tag, not the tag --------
+
+test('a closing tag carrying junk is exit 2, not a parsed tag', () => {
+    // `</string junk>` used to parse as an ordinary closing tag and produce a
+    // verdict. ElementTree rejects the same file as not well-formed.
+    const ipa = makeIpa({
+        rawPlist: '<?xml version="1.0"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key><string>com.fixture.app</string junk>\n</dict></plist>\n',
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /closing tag carries no attributes/);
+});
+
+test('ordinary attributes on a real plist still parse', () => {
+    // The false-positive guard: `<plist version="1.0">` must keep working, and
+    // so must a DOCTYPE and nested elements.
+    const ipa = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app' }) });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 0, out);
+});
+
+// --- a declared type must actually hold that type --------------------------
+
+test('<integer> holding a fraction is exit 2', () => {
+    const ipa = makeIpa({
+        rawPlist: '<?xml version="1.0"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key><string>com.fixture.app</string>\n<key>N</key><integer>1.5</integer>\n</dict></plist>\n',
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: '1.5' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /which is not an integer/);
+});
+
+test('<data> holding invalid base64 is exit 2, not a shorter buffer', () => {
+    // Buffer.from(..., 'base64') silently DISCARDS unrecognised characters, so
+    // garbage decoded to some shorter buffer and the run carried on with bytes
+    // the document does not contain.
+    const ipa = makeIpa({
+        rawPlist: '<?xml version="1.0"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key><string>com.fixture.app</string>\n<key>B</key><data>!!!not base64!!!</data>\n</dict></plist>\n',
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { required: [{ key: 'B', why: 'blob' }] } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /not valid base64/);
+});
+
+test('a NaN real in a BINARY plist is refused, matching the XML reader', () => {
+    // The XML reader already refused a non-finite <real>; the binary one did
+    // not, so NaN came back as a value. describePlistValue has no branch for
+    // it, JSON.stringify(NaN) is the string "null", and the violation message
+    // then reported a present, non-null value as `null` -- the same fabricated
+    // null the old `return null` bug produced, through a different door.
+    const raw = execFileSync('python3', ['-c',
+        'import plistlib,sys;sys.stdout.buffer.write(plistlib.dumps({"CFBundleIdentifier":"com.fixture.app","Weird":float("nan")}, fmt=plistlib.FMT_BINARY))'],
+    { maxBuffer: 1 << 20 });
+    const { code, out } = run(makeIpa({ rawPlist: raw }), makeManifest({ infoPlist: { equals: { Weird: 'nan-marker' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /NaN or Infinity/);
+    assert.doesNotMatch(out, /is null/);
+});
+
+// --- --json means machine-readable on EVERY exit code ----------------------
+
+test('--json emits a parseable envelope on exit 2 and exit 3', () => {
+    // Both handlers wrote prose to stderr and exited before the JSON writer was
+    // reached, so stdout was empty on exactly the two codes a machine consumer
+    // most needs structure for. A CI wrapper doing JSON.parse(stdout) got a
+    // parse error on empty input.
+    const badIpa = makeIpa({ rawPlist: 'not a plist at all' });
+    const two = spawnSync('node', [TOOL, '--ipa', badIpa, '--manifest', makeManifest({ infoPlist: { equals: { a: 'b' } } }), '--json'], { encoding: 'utf8' });
+    assert.equal(two.status, 2);
+    const parsedTwo = JSON.parse(two.stdout);
+    assert.equal(parsedTwo.verdict, 'ARTIFACT_UNREADABLE');
+    assert.equal(parsedTwo.exitCode, 2);
+    assert.ok(parsedTwo.error, 'the envelope must carry the reason');
+
+    const three = spawnSync('node', [TOOL, '--ipa', badIpa, '--manifest', '/nonexistent-manifest.json', '--json'], { encoding: 'utf8' });
+    assert.equal(three.status, 3);
+    const parsedThree = JSON.parse(three.stdout);
+    assert.equal(parsedThree.verdict, 'VERIFIER_MISCONFIGURED');
+    assert.equal(parsedThree.exitCode, 3);
+});
