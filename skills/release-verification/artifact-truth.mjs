@@ -629,7 +629,25 @@ function parseBinaryPlist(buf) {
     if (high === 0x5) {
       const { len, next } = readLen(pos + 1, low);
       need(next, len, 'ascii string');
-      return buf.subarray(next, next + len).toString('ascii');
+      const raw = buf.subarray(next, next + len);
+      // VALIDATE, do not just decode. Node's 'ascii' encoding is a misnomer: it
+      // is latin1 with the high bit MASKED OFF, not a validating decoder, so
+      // 0xC6 0xEF 0xEF silently becomes "Foo". Marker 0x5 is defined as 7-bit
+      // ASCII (that is precisely why marker 0x6 exists for everything else), and
+      // CFPropertyList/plistlib both reject a high byte here outright. Masking
+      // would let this reader see a DIFFERENT string than iOS sees -- and a rule
+      // answered against a string the device never reads is a false CLEAN, the
+      // one outcome this tool must never produce.
+      for (let i = 0; i < raw.length; i++) {
+        if (raw[i] > 0x7f) {
+          throw new Error(
+            `binary plist: byte 0x${raw[i].toString(16).padStart(2, '0')} at offset ${next + i} ` +
+            `is not 7-bit ASCII, but the marker (0x5) declares an ASCII string. ` +
+            `A conformant reader rejects this document; decoding it anyway would mask the high bit ` +
+            `and yield a string the device never sees.`);
+        }
+      }
+      return raw.toString('latin1'); // every byte is <= 0x7f, so this is exact
     }
     if (high === 0x6) {
       const { len, next } = readLen(pos + 1, low);
@@ -637,7 +655,28 @@ function parseBinaryPlist(buf) {
       // COPY before swapping. `swap16()` mutates in place, and a string object
       // referenced from two places would be swapped twice -- correct on the
       // first read and silently mojibake on the second.
-      return Buffer.from(buf.subarray(next, next + len * 2)).swap16().toString('utf16le');
+      const s = Buffer.from(buf.subarray(next, next + len * 2)).swap16().toString('utf16le');
+      // Same reasoning as the ASCII branch: 'utf16le' accepts an unpaired
+      // surrogate and hands back a lone \uD800, where a conformant parser
+      // rejects the document. Reject rather than carry a half-character that no
+      // other reader agrees with.
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xd800 && c <= 0xdbff) {
+          const nxt = i + 1 < s.length ? s.charCodeAt(i + 1) : -1;
+          if (!(nxt >= 0xdc00 && nxt <= 0xdfff)) {
+            throw new Error(
+              `binary plist: unpaired high surrogate U+${c.toString(16).toUpperCase()} ` +
+              `at code unit ${i} of a UTF-16 string (marker 0x6). A conformant reader rejects this document.`);
+          }
+          i++; // consume the low half of a valid pair
+        } else if (c >= 0xdc00 && c <= 0xdfff) {
+          throw new Error(
+            `binary plist: unpaired low surrogate U+${c.toString(16).toUpperCase()} ` +
+            `at code unit ${i} of a UTF-16 string (marker 0x6). A conformant reader rejects this document.`);
+        }
+      }
+      return s;
     }
     if (high === 0xa) {
       const { len, next } = readLen(pos + 1, low);

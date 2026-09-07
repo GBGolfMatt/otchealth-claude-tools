@@ -2286,3 +2286,102 @@ test('removing a comment cannot manufacture a version tag across the cut', () =>
     assert.doesNotMatch(out, /v9\.9\.9/);
     assert.doesNotMatch(out, /contains 2 elements/, 'text joined across a comment cut is not a second element');
 });
+
+// --- the string decoders must VALIDATE, not merely decode --------------------
+//
+// Found in round 31, after thirty rounds had missed it, because the two calls
+// read as obviously correct: `.toString('ascii')` under an ASCII marker and
+// `.toString('utf16le')` under a UTF-16 marker. Node's 'ascii' encoding is a
+// misnomer -- it is latin1 with the high bit MASKED OFF, not a validating
+// decoder -- and 'utf16le' accepts an unpaired surrogate. So this reader could
+// see a different string than the device sees, and answer a rule against it.
+
+// Build a real plistlib binary plist, then corrupt one string's bytes in place.
+// The helper ASSERTS that plistlib rejects the result, so "the correct verdict
+// is exit 2" is established by the test rather than asserted by its author.
+function corruptedBinaryPlist(obj, findBytes, patch) {
+    const good = binaryPlistOf(obj);
+    const at = good.indexOf(Buffer.from(findBytes));
+    assert.ok(at >= 0, 'fixture bug: marker+string not found in the generated plist');
+    const bad = Buffer.from(good);
+    patch(bad, at);
+    // Ground truth: an independent, spec-following reader refuses this document.
+    const verdict = execFileSync('python3', ['-c', [
+        'import plistlib,sys',
+        'try:',
+        '    plistlib.loads(sys.stdin.buffer.read(), fmt=plistlib.FMT_BINARY); print("ACCEPTED")',
+        'except Exception as e: print("REJECTED")',
+    ].join('\n')], { input: bad, encoding: 'utf8' }).trim();
+    assert.equal(verdict, 'REJECTED', 'fixture bug: plistlib accepts this, so exit 2 would be wrong');
+    return bad;
+}
+
+test('a high byte under the ASCII marker is unreadable, not a CLEAN equality', () => {
+    // 0x53 is "ASCII string, length 3". Node would mask 0xC6 0xEF 0xEF into
+    // "Foo" -- the exact value the manifest expects -- and report a verified
+    // pass on a string no conformant reader produces.
+    const rawPlist = corruptedBinaryPlist(
+        { CFBundleIdentifier: 'com.fixture.app', CFBundleName: 'Foo', CFBundleShortVersionString: '1.0' },
+        [0x53, 0x46, 0x6f, 0x6f],
+        (b, at) => { b[at + 1] = 0xc6; b[at + 2] = 0xef; b[at + 3] = 0xef; });
+    const ipa = makeIpa({ rawPlist });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleName: 'Foo' } } }));
+    assert.equal(code, 2, `masked high bits must be unreadable, not clean; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+    assert.doesNotMatch(out, /^\s*fail\b/m, 'exit 2 reports no finding either');
+    assert.match(out, /not 7-bit ASCII/);
+});
+
+test('the TCC incident itself, hidden behind a masked usage string, is unreadable', () => {
+    // The motivating bug, verbatim: a share-to-Save-Image path whose photo
+    // library usage string is unreadable. Reporting CLEAN here would ship the
+    // crash this tool was written to catch. 0x52 is "ASCII string, length 2";
+    // 0xCF 0xCB mask down to "OK".
+    const rawPlist = corruptedBinaryPlist(
+        { CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.0', NSPhotoLibraryAddUsageDescription: 'OK' },
+        [0x52, 0x4f, 0x4b],
+        (b, at) => { b[at + 1] = 0xcf; b[at + 2] = 0xcb; });
+    const ipa = makeIpa({ rawPlist, web: { 'js/share.js': 'navigator.share({ files: [png] })' } });
+    const { code, out } = run(ipa, makeManifest({
+        infoPlist: { required: [{ key: 'NSPhotoLibraryAddUsageDescription', why: 'save image writes to the library' }] },
+        capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription', why: 'share to Save Image reaches the library' }],
+    }));
+    assert.equal(code, 2, `an unreadable usage string must block, not pass; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('an unpaired surrogate under the UTF-16 marker is unreadable', () => {
+    // Marker 0x6 strings are the branch every non-ASCII usage string takes.
+    // 'utf16le' hands back a lone \uD800 rather than throwing.
+    const rawPlist = corruptedBinaryPlist(
+        { CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.0', NSPhotoLibraryAddUsageDescription: 'OK™' },
+        [0x63, 0x00, 0x4f, 0x00, 0x4b],           // UTF-16 string, length 3: "OK™"
+        (b, at) => { b[at + 5] = 0xd8; b[at + 6] = 0x00; });
+    const ipa = makeIpa({ rawPlist });
+    const { code, out } = run(ipa, makeManifest({
+        infoPlist: { required: [{ key: 'NSPhotoLibraryAddUsageDescription', why: 'declared' }] },
+    }));
+    assert.equal(code, 2, `a lone surrogate must be unreadable, not clean; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+    assert.match(out, /surrogate/);
+});
+
+test('a legitimate non-ASCII usage string still reads exactly', () => {
+    // The counterweight. Hardening a parser into rejecting real artifacts would
+    // trade a false CLEAN for a blocked release line, which is not a fix. Emoji
+    // are a VALID surrogate PAIR and must survive; accented text must too.
+    const rawPlist = binaryPlistOf({
+        CFBundleIdentifier: 'com.fixture.app',
+        CFBundleShortVersionString: '1.0',
+        NSPhotoLibraryAddUsageDescription: 'Guardar imagen éè 📸',
+    });
+    const ipa = makeIpa({ rawPlist });
+    const { code, out } = run(ipa, makeManifest({
+        infoPlist: {
+            required: [{ key: 'NSPhotoLibraryAddUsageDescription', why: 'declared' }],
+            equals: { NSPhotoLibraryAddUsageDescription: 'Guardar imagen éè 📸' },
+        },
+    }));
+    assert.equal(code, 0, `valid UTF-16 including a surrogate pair must read exactly; got ${code}: ${out}`);
+    assert.match(out, /VERDICT: CLEAN/);
+});
