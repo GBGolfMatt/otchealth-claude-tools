@@ -232,11 +232,22 @@ The ladder out, cheapest first:
    "no additional artifact" two clauses before naming the additional artifact,
    which was simply wrong. Writing the tests IS the work; what this bullet
    establishes is that the surrounding infrastructure needs nothing new.
+   **UNVERIFIED, and it changes the estimate:** an earlier draft stated that
    XCUITest reads WKWebView content through the standard accessibility
-   hierarchy, so a Capacitor app is reachable without any webview-context
-   gymnastics. This is where class B items that need a real device go — item 16
-   (Save Image) becomes "tap share, tap Save Image, assert the app is still
-   alive and the picker appeared."
+   hierarchy, so a Capacitor app is reachable without webview-context
+   gymnastics. Nothing here establishes that. The compatibility result above is
+   about test types and device pools; it says nothing about element
+   accessibility inside a web view, and no XCUITest has been written against one
+   of our apps yet. If web content turns out NOT to be reachable that way, every
+   web-layer assertion has to go through a different mechanism and this stage is
+   materially more work than it looks. Treat it as an open question to settle
+   with one throwaway test before planning around it.
+
+   What IS established: this is where class B items needing a real device go,
+   and the ones that touch native UI rather than web content — item 16 (Save
+   Image) becomes "tap share, tap Save Image, assert the app is still alive and
+   the picker appeared" — are reachable regardless, because the share sheet and
+   the photo picker are native.
 3. **Appium** only if iOS+Android test reuse is wanted. It now *mandates*
    custom-environment YAML (confirmed: `GetDevicePoolCompatibility` with
    `APPIUM_NODE` returns a hard `ArgumentException` demanding a test spec), and

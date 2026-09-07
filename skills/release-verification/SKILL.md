@@ -203,9 +203,15 @@ earlier version of this table omitted it — so the documented behaviour and the
 implemented behaviour disagreed until a review pass caught it.
 
 It is deliberate rather than an oversight in the code. A usage-description is
-the sentence iOS shows in the permission prompt; `""` renders an empty prompt
-and draws an App Review rejection whether or not anything reaches the API. It is
-a defect in the artifact on its own terms, so it is reported on its own terms.
+the sentence iOS shows in the permission prompt, so `""` is a declared key that
+discloses nothing — a defect in the artifact on its own terms, independent of
+whether anything reaches the API, which is why it is reported on its own terms.
+
+An earlier draft justified this by asserting it "draws an App Review rejection".
+That is a claim about Apple's review process with no citation behind it, and the
+rule does not need it: "a declared key that discloses nothing" is checkable in
+the artifact, which is the only kind of claim this document is entitled to make
+about someone else's system.
 The other rows are about *coupling*; this one is about the key being broken.
 
 The left column says *text match*, not *reachable*, and so does every line the
