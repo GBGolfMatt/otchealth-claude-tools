@@ -57,9 +57,14 @@ lesson trustworthy rather than a rule of thumb:
   Every narrative version of this count was an undercount, each inheriting the
   last, which is why it is a committed query now rather than a sentence.
 
-  Apple's own binary scanner cannot
-  see it, because that scanner does static API-surface analysis and the app
-  links no PhotoKit at all.
+  There is also nothing here for a symbol-based scan to find: **the app links no
+  PhotoKit at all.** The write happens inside `UIActivityViewController` on the
+  user's behalf when they choose *Save Image*, so the photo-library access never
+  appears as an API the binary calls. That is a statement about our own artifact,
+  which is checkable. An earlier draft went further and asserted what Apple's
+  scanner does internally; that was an unsourced claim about someone else's
+  tooling, and it is removed rather than dressed up with a citation invented
+  after the fact.
 - **AWARE, one day later.** Reading the repo produced a confident P0 that was
   simply false: `www/` contains `getUserMedia` in two modules behind visible
   buttons, and the shipped plist declares no microphone key. Identical shape

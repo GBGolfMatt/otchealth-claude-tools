@@ -359,6 +359,20 @@ only happens when someone thinks to run it is not a gate.
    SUCCESS — all reported healthy while doing nothing. Distinguish *transport
    failure* from *clean result* at every layer.
 
+   "Fail loudly" has two halves, and the second is the one that gets forgotten:
+   an unreadable artifact must not print a PASS, **and must not print a FINDING
+   either**. Both halves were violated for real in this codebase, in the same
+   week. A truncated `Info.plist` read every key past the cut as absent, so a
+   coupling rule announced "Info.plist does NOT declare
+   NSMicrophoneUsageDescription" — a confident, quotable accusation about a key
+   the tool never actually looked at. Separately, a plist reader returned `null`
+   for value types it did not implement, and the equality check then compared
+   `String(null)` and reported version drift. Neither was a missed detection;
+   both were fabricated detections, manufactured out of the reader's own
+   inability to read. A verifier that invents findings when it cannot see gets
+   distrusted faster than one that misses them, because every false finding
+   costs someone an investigation.
+
    And distinguish the failures from EACH OTHER, which is the harder half.
    `artifact-truth.mjs` separates exit 2 (the artifact could not be read) from
    exit 3 (the verifier's own manifest is unusable) because an earlier version
