@@ -267,9 +267,21 @@ function parseXmlPlist(text) {
   const ENTITY = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
   const decode = (raw) => raw.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, e) => {
     if (Object.prototype.hasOwnProperty.call(ENTITY, e)) return ENTITY[e];
-    if (e[0] !== '#') return m; // unknown named entity: leave it visible rather than inventing a character
+    // An undefined named entity makes the document invalid XML, full stop. This
+    // used to return the text unchanged, under a comment saying that was better
+    // than "inventing a character" -- which sounds prudent and is the wrong
+    // call, because it invents something too: a string the document does not
+    // mean. Reproduced: a display name of `Ear &widget; Eye` produced
+    // VERDICT: CLEAN here, while Python's ElementTree rejects the same file
+    // outright with "undefined entity". Reporting a verdict on a document a
+    // real parser refuses is precisely what exit 2 exists to prevent. The plist
+    // DTD defines no entities beyond XML's five, and a DOCTYPE with an internal
+    // subset is already refused above, so there is nothing legitimate here to
+    // preserve.
+    if (e[0] !== '#') fail(`uses the undefined XML entity &${e};, so it is not a document any XML parser would accept`);
     const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-    return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+    if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) fail(`uses the out-of-range character reference &${e};`);
+    return String.fromCodePoint(code);
   });
 
   // Character data up to the next element, with CDATA spliced in and entities

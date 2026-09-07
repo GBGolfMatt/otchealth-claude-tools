@@ -224,6 +224,28 @@ scrutiny, misleading permission prompts). Leave it off where a key is
 legitimately there for a native path the web bundle cannot see — which is why
 it is per-rule rather than global.
 
+**`infoPlist.equals` compares SCALARS only.** A key holding a dict, an array or
+a data blob produces a violation saying so, never a pass. That is not a
+limitation worth apologising for, it is the repair for a live false CLEAN: the
+comparison used to run against the tool's own *printed summary* of the value, and
+that summary is the literal `<dict>` for every dict. So
+`equals: { "NSAppTransportSecurity": "<dict>" }` passed for a locked-down ATS and
+for a wide-open one carrying an injected exception domain, identically. Arrays
+were gated on length alone.
+
+The trap was worse than the wrong verdict. An author who writes the real intended
+content watches the rule fail forever, and the obvious way to fix a rule that
+will not pass is to paste in the summary the tool just printed — at which point
+it is permanently satisfied by anything of that shape. Pinning the *contents* of
+a structured key needs a rule that reads inside it, which this tool does not yet
+have; until it does, refusing is the honest answer.
+
+**`infoPlist.required` means PRESENT**, by `hasOwnProperty`, not truthy. `false`
+and `0` are ordinary plist values — `ITSAppUsesNonExemptEncryption` is *usually*
+`false`, and it is declared precisely so App Store Connect stops asking on every
+build. A present key whose string value is blank is reported as blank, separately
+from absent, because those are different defects with different fixes.
+
 **`andBundleMatches` narrows a rule to files matching BOTH patterns**, and both
 must hit the *same* file. It exists because a share call alone does not imply a
 photo-library write: sharing a PDF offers Save to Files and never touches the

@@ -2062,3 +2062,44 @@ test('a required key present with a blank string says so, rather than MISSING', 
     assert.match(out, /present but its string value is blank/);
     assert.doesNotMatch(out, /MISSING/);
 });
+
+// --- an undefined XML entity makes the document invalid, so refuse it -------
+// The decoder used to return an unknown named entity unchanged, under a comment
+// arguing that was better than "inventing a character". It invents something
+// too: a string the document does not mean. Verified against a real parser --
+// Python's ElementTree rejects the same file with "undefined entity" -- while
+// this tool printed VERDICT: CLEAN. Reporting a verdict on a document no XML
+// parser accepts is exactly what exit 2 exists to prevent.
+
+const ENTITY_PLIST = (value) => [
+    '<?xml version="1.0" encoding="UTF-8"?>', '<plist version="1.0"><dict>',
+    '  <key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+    `  <key>N</key><string>${value}</string>`,
+    '</dict></plist>', '',
+].join('\n');
+
+test('an undefined named XML entity is exit 2, not a verdict', () => {
+    const ipa = makeIpa({ rawPlist: ENTITY_PLIST('Ear &widget; Eye') });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: 'Ear &widget; Eye' } } }));
+    assert.equal(code, 2, `an invalid document must not yield a verdict; got ${code}: ${out}`);
+    assert.match(out, /undefined XML entity &widget;/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('the five predefined entities and numeric references still decode', () => {
+    // The false-positive guard. Refusing unknown entities must not break the
+    // ones every real plist uses -- an ampersand in a display name is ordinary.
+    const ipa = makeIpa({ rawPlist: ENTITY_PLIST('A &amp; B &lt;C&gt; &quot;D&quot; &apos;E&apos; &#8212; &#x2014;') });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: 'A & B <C> "D" \'E\' — —' } } }));
+    assert.equal(code, 0, out);
+});
+
+test('a bare ampersand that forms no entity reference is left alone', () => {
+    // The regex only matches `&name;` and `&#nnn;`. A stray `&` is technically
+    // invalid XML too, but it is not an entity reference, and widening the
+    // refusal to cover it would reject strings that carry no ambiguity about
+    // what they mean.
+    const ipa = makeIpa({ rawPlist: ENTITY_PLIST('Tom &amp; Jerry 50 &gt; 40') });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: 'Tom & Jerry 50 > 40' } } }));
+    assert.equal(code, 0, out);
+});
