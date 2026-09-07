@@ -1200,3 +1200,11 @@ finding with `node ledger.mjs finding add`, close one with
 - **Verified by:** (not verified)
 - **Opened:** 2026-09-05T21:46:18.200Z
 - **Closed:** 2026-09-05T23:08:15.224Z
+
+### finding:FND-20260907-c2e9 severity:medium status:fixed | Codex seat installer v1 could never work on Windows: bearer_token_env_var is checked BEFORE all other auth and fails the whole MCP server when the named variable is missing from the Codex process, while Windows only gives a newly created User env var to processes started afterwards and the ChatGPT desktop app keeps a background process alive across a window close. Symptom is indistinguishable from a broken gateway: the seat lists hundreds of unrelated tools and zero gateway tools, and reports 'connection is not healthy'. Proved by A/B with the real codex client against the live gateway (variable absent -> wake unavailable; literal http_headers Authorization -> {"agent":"cto","wake_ok":true}). FIXED in installer v2 (uploaded 2026-09-07): token written as a literal Authorization entry in http_headers in the Codex config, env-var path removed entirely (setting BOTH would keep the bug, since the env var short-circuits first). End-to-end verified per seat: CTO folder->cto, CFO->cfo, COO->coo.
+
+- **Source audit doc:** otchealth-cto/codex-agents/START-HERE.md
+- **Fix commit:** (none yet)
+- **Verified by:** codex-authmode-exec.mjs A/B plus e2e-verify-installer-output.mjs against the config the packaged installer wrote under pwsh
+- **Opened:** 2026-09-07T03:41:59.723Z
+- **Closed:** 2026-09-07T03:41:59.723Z
