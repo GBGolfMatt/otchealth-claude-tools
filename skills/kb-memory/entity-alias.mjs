@@ -37,3 +37,25 @@ export function buildAliasEntry(rows, input) {
   };
   return { entry, previous };
 }
+
+const normKey = (value) => String(value || "").toLowerCase().trim()
+  .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+/** Resolve an alias target from fresh rows and require a real current entity. */
+export function resolveAliasTarget(rows, rawTarget) {
+  let key = normKey(rawTarget);
+  if (!key) throw new Error("entity alias target is required");
+  const seen = new Set();
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (seen.has(key)) throw new Error(`entity alias target cycle: ${key}`);
+    seen.add(key);
+    const next = currentAlias(rows, key);
+    if (!next?.evalue || next.evalue === key) break;
+    key = normKey(next.evalue);
+  }
+  const entity = rows
+    .filter((row) => row.type === "entity" && row.ekey === key)
+    .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""))[0];
+  if (!entity) throw new Error(`entity alias target does not exist: ${key}`);
+  return key;
+}

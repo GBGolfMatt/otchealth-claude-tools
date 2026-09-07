@@ -43,7 +43,8 @@ import { writeAdvisory, RING_DENY } from "./dedupe.mjs";
 import { parseNdjson, serializeNdjson, nextId, isConflict, condHeaders } from "./blobwrite.mjs";
 import { kvSecret } from "./azure-secret.mjs";
 import { linkFields, walkGraph, formatEdge } from "./entity-graph.mjs";
-import { assertAliasOwner, buildAliasEntry } from "./entity-alias.mjs";
+import { assertAliasOwner, buildAliasEntry, resolveAliasTarget } from "./entity-alias.mjs";
+import { assertCrossLaneAllowed } from "./lane-policy.mjs";
 import { getTextFromS3, getTextMetaFromS3, putObjectToS3, listBlobsFromS3, s3Configured } from "./s3-blob.mjs";
 import { awsCredsPresent } from "./aws-secret.mjs";
 import { FAILED_WRITE_FILE, appendFailedWriteFallback } from "./local-fallback.mjs";
@@ -114,6 +115,8 @@ const AGENT = (takeVal("--agent", "") || "").toLowerCase();        // the WRITER
 const ON = (takeVal("--on", "") || AGENT).toLowerCase();           // the TARGET ledger (default: self)
 const CROSS = Boolean(AGENT && ON && AGENT !== ON);                // writing on ANOTHER exec agent's ledger
 const A = AGENTS[ON] || (ON ? { ...AGENTS.commons, _file: ON } : null); // the STORE is the TARGET lane's
+// The personal legal lane is segregated in both directions. Enforce this before any store opens.
+assertCrossLaneAllowed(AGENT, ON);
 const TAGS = (takeVal("--tags", "") || "").split(",").map((s) => s.trim()).filter(Boolean);
 const SOURCE = takeVal("--source", "");
 const WAS = takeVal("--was", "");
@@ -644,9 +647,8 @@ async function entityCmd() {
     let fromRef, toRef, prevRef;
     const { entry } = await commitAppend((freshRows) => {
       fromRef = normKey(positional[1] || "");
-      toRef = resolveAlias(freshRows, positional[2] || "");
+      toRef = resolveAliasTarget(freshRows, positional[2] || "");
       if (fromRef === toRef) throw new Error(`entity alias must not point ${fromRef} to itself`);
-      if (!currentEntity(freshRows, toRef)) throw new Error(`entity alias target does not exist: ${toRef}`);
       const built = buildAliasEntry(freshRows, {
         fromKey: fromRef,
         toKey: toRef,

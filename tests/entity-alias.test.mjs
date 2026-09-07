@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertAliasOwner, buildAliasEntry, currentAlias } from "../skills/kb-memory/entity-alias.mjs";
+import { assertAliasOwner, buildAliasEntry, currentAlias, resolveAliasTarget } from "../skills/kb-memory/entity-alias.mjs";
 
 const alias = (id, ts, from, to) => ({
   id,
@@ -68,4 +68,28 @@ test("shared current-value aliases stay scoped and do not use historical or gene
     assert.equal(generic.has(key), false);
     assert.equal(/(?:historical|formerly|previous|before|used_to)/.test(key), false);
   }
+});
+
+test("currentAlias is independent of input chronology", () => {
+  const rows = [
+    alias("latest", "2026-09-03T00:00:00Z", "current_brain_backend", "new_key"),
+    alias("oldest", "2026-09-01T00:00:00Z", "current_brain_backend", "old_key"),
+    alias("middle", "2026-09-02T00:00:00Z", "current_brain_backend", "middle_key"),
+  ];
+  assert.equal(currentAlias(rows, "current_brain_backend")?.id, "latest");
+});
+
+test("resolveAliasTarget accepts an indirect chain ending in a current entity", () => {
+  const rows = [
+    { type: "entity", ekey: "otchealth_brain_backend", evalue: "safe", ts: "3", id: "e1" },
+    alias("a1", "1", "brain_now", "current_brain_backend"),
+    alias("a2", "2", "current_brain_backend", "otchealth_brain_backend"),
+  ];
+  assert.equal(resolveAliasTarget(rows, "Brain Now"), "otchealth_brain_backend");
+});
+
+test("resolveAliasTarget rejects missing targets and malformed cycles", () => {
+  assert.throws(() => resolveAliasTarget([], "missing"), /does not exist/);
+  const cycle = [alias("a1", "1", "x_alias", "y_alias"), alias("a2", "1", "y_alias", "x_alias")];
+  assert.throws(() => resolveAliasTarget(cycle, "x alias"), /cycle/);
 });
