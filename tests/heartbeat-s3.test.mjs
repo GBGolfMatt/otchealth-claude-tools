@@ -70,7 +70,7 @@ globalThis.fetch = async (url, opts) => {
 `;
 }
 
-function runHeartbeat(args, { presetStore } = {}) {
+function runHeartbeat(args, { presetStore, registry } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "heartbeat-s3-test-"));
   const logPath = join(dir, "calls.log");
   const storePath = join(dir, "store.json");
@@ -78,10 +78,13 @@ function runHeartbeat(args, { presetStore } = {}) {
   writeFileSync(storePath, JSON.stringify(presetStore || {}));
   const preload = join(dir, "preload.mjs");
   writeFileSync(preload, preloadSource(logPath, storePath));
+  const registryPath = join(dir, "heartbeat-registry.json");
+  if (registry !== undefined) writeFileSync(registryPath, JSON.stringify(registry));
   const env = {
     PATH: process.env.PATH,
     AWS_ACCESS_KEY_ID: "AKIAUNITTESTFAKE0000",
     AWS_SECRET_ACCESS_KEY: "unit-test-fake-secret-access-key-not-real",
+    ...(registry !== undefined ? { NODE_ENV: "test", HEARTBEAT_TEST_REGISTRY_FILE: registryPath } : {}),
   };
   return execFileP(process.execPath, ["--import", pathToFileURL(preload).href, HEARTBEAT_MJS, ...args], { env, timeout: 15000 })
     .then((r) => ({ status: 0, stdout: r.stdout, stderr: r.stderr, calls: readCalls(logPath), store: JSON.parse(readFileSync(storePath, "utf8")) }))
@@ -101,7 +104,7 @@ test("beat writes to S3 (otchealth-brain-dr-55c84f6b), at the exact key _HEARTBE
   assert.ok(stored.last_ok, "an 'ok' beat must set last_ok");
 });
 
-test("check reports a beat written by a prior run as LIVE, reading it back from S3", async () => {
+test("check reports an unregistered prior beat as UNKNOWN because no cadence is registered", async () => {
   const nowIso = new Date().toISOString();
   const presetStore = {
     ["/" + S3_KEY_PREFIX + "_HEARTBEAT/porttest-s3-hb.json"]: JSON.stringify({ job: "porttest-s3-hb", last_event: "ok", last_ok: nowIso, consecutive_fail: 0 }),
@@ -111,7 +114,8 @@ test("check reports a beat written by a prior run as LIVE, reading it back from 
   const rows = JSON.parse(r.stdout);
   const row = rows.find((x) => x.job === "porttest-s3-hb");
   assert.ok(row, "the seeded job must appear in check's output (from the S3 listing, since it is not in the registry)");
-  assert.equal(row.status, "LIVE");
+  assert.equal(row.status, "UNKNOWN");
+  assert.equal(row.intervalMin, null);
   assert.deepEqual(r.calls.filter((c) => AZURE_HOST_RE.test(c.url)), [], "must never reach an Azure/ARM/Key-Vault host");
 });
 
@@ -193,6 +197,7 @@ test("unregistered future and malformed completion times appear in the attention
     ["/" + S3_KEY_PREFIX + "_HEARTBEAT/future-clock.json"]: JSON.stringify({ last_ok: new Date(Date.now() + 86400000).toISOString() }),
     ["/" + S3_KEY_PREFIX + "_HEARTBEAT/invalid-clock.json"]: JSON.stringify({ last_ok: "not-a-date" }),
     ["/" + S3_KEY_PREFIX + "_HEARTBEAT/new-job.json"]: JSON.stringify({ last_event: "start" }),
+    ["/" + S3_KEY_PREFIX + "_HEARTBEAT/recent-unregistered.json"]: JSON.stringify({ last_ok: new Date().toISOString() }),
   };
   const r = await runHeartbeat(["check"], { presetStore });
   assert.equal(r.status, 0, r.stderr);
@@ -204,6 +209,27 @@ test("unregistered future and malformed completion times appear in the attention
   assert.match(r.stdout, /\[NO-DATA\] new-job/);
 });
 
+test("null and malformed registered cadence entries are UNKNOWN through the CLI path", async () => {
+  const nowIso = new Date().toISOString();
+  const registry = {
+    "null-registry-entry": null,
+    "missing-cadence": { owner: "cto" },
+    "zero-cadence": { interval_min: 0, owner: "cto" },
+    "string-cadence": { interval_min: "5", owner: "cto" },
+  };
+  const presetStore = Object.fromEntries(Object.keys(registry).map((job) => [
+    "/" + S3_KEY_PREFIX + `_HEARTBEAT/${job}.json`, JSON.stringify({ last_ok: nowIso }),
+  ]));
+  const r = await runHeartbeat(["check", "--json"], { presetStore, registry });
+  assert.equal(r.status, 0, r.stderr);
+  const rows = JSON.parse(r.stdout);
+  for (const job of Object.keys(registry)) {
+    const row = rows.find((entry) => entry.job === job);
+    assert.ok(row, `${job} must remain visible`);
+    assert.equal(row.status, "UNKNOWN");
+    assert.equal(row.intervalMin, null);
+  }
+});
 test("a registered job with a small clock skew remains LIVE without a restart annotation", async () => {
   const presetStore = {
     ["/" + S3_KEY_PREFIX + "_HEARTBEAT/brain-reindex.json"]: JSON.stringify({ last_ok: new Date(Date.now() + 30000).toISOString() }),
