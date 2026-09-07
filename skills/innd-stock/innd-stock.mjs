@@ -51,6 +51,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getBufferFromS3, putObjectToS3 } from "../kb-memory/s3-blob.mjs";
+import { publishPriceRail } from "./publish-price-rail.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Lazy-install xlsx if missing (skill is dependency-light otherwise).
@@ -111,7 +112,13 @@ function storageURI(){ return `s3://${S3_ACCOUNT}/${S3_CONTAINER}/${S3_BLOB}`; }
 // "no workbook", the exact class of bug this whole cluster of ports exists to close).
 async function storageDownload(){ return getBufferFromS3(S3_ACCOUNT, S3_CONTAINER, S3_BLOB); }
 async function storageUpload(buf){
-  await putObjectToS3(S3_ACCOUNT, S3_CONTAINER, S3_BLOB, buf, XLSX_CT);
+  const XLSX = loadXLSX();
+  const workbook = XLSX.read(buf, { type: "buffer" });
+  const extractedText = workbook.SheetNames.map((name) =>
+    `Sheet: ${name}\n${XLSX.utils.sheet_to_csv(workbook.Sheets[name])}`
+  ).join("\n\n");
+  const receipt = await publishPriceRail({ workbook: buf, extractedText, put: putObjectToS3, get: getBufferFromS3 });
+  console.log(JSON.stringify({ event: "price_rail_published", ...receipt }));
   return storageURI();
 }
 
@@ -274,7 +281,7 @@ function buildWorkbook(XLSX, rows){
     ["Through", rows.length?rows[rows.length-1].date:"-"],
     ["Trading days", String(rows.length)],
     ["Massive (Polygon) coverage", `${rows.filter(r=>r.src==="massive").length} of ${rows.length} days carry TRUE VWAP + trade count (the rest use the Yahoo proxy).`],
-    ["PRICE BASIS = AS-TRADED", "Open / High / Low / Close / Volume / VWAP are AS-TRADED: what actually changed hands that day. INND did a 1-for-2500 reverse split on 2024-08-22 (see the Corporate Actions sheet). Yahoo reports a split-adjusted series, so its deep-history values are de-split back to as-traded here (price / 2500, volume x 2500 before 2024-08-22; verified against Polygon's raw feed)."],
+    ["PRICE BASIS = AS-TRADED", "Open / High / Low / Close / Volume / VWAP are AS-TRADED: what actually changed hands that day. INND did a 1-for-2500 reverse split on 2024-08-22 (see the Corporate Actions sheet). Yahoo reports a split-adjusted series, so its deep-history values are de-split back to as-traded here (price / 2500, volume x 2500 before 2024-08-22). Source comments document a 2024-06-24 spot check against Polygon; this is not evidence that every historical row or 2021-11-23 was independently verified."],
     ["Split-Adj Close column", "A continuous, split-adjusted close on today's share basis, comparable across the reverse split. Daily Change ($/%) is computed on THIS column, so the 2024-08-22 split is not shown as a fake ~2500x one-day move. The as-traded Close jumps ~2500x on the split date by design (that is what the tape shows)."],
     ["VWAP note", "For Massive (Polygon) rows the VWAP is the TRUE daily volume-weighted average price (as-traded). For the older Yahoo rows it is the typical-price proxy (High+Low+Close)/3. The Source column flags each."],
     ["Trades note", "Trades = the day's number of executed transactions (Massive/Polygon). Blank for the older Yahoo-only history. A useful liquidity gauge for a thinly traded stock (some recent days have under 50 trades)."],
