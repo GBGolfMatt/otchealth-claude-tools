@@ -14,6 +14,11 @@ import { CURRENT_CLOUD_ALIASES, CURRENT_CLOUD_ENTITIES, normEntityKey } from "./
 export const ENTITY_SEED = CURRENT_CLOUD_ENTITIES;
 export const ALIAS_SEED = CURRENT_CLOUD_ALIASES;
 
+const hasExactTag = (row, tag) => {
+  const tags = Array.isArray(row?.tags) ? row.tags : String(row?.tags || "").split(",");
+  return tags.some((value) => value.trim().toLowerCase() === tag);
+};
+
 export function planSeed(summary, rows) {
   if (!summary?.ok) return { ok: false, error_category: "unsafe_inventory", operations: [], skipped: [] };
   const operations = [];
@@ -31,7 +36,7 @@ export function planSeed(summary, rows) {
     const current = rows.filter((row) => row.type === "alias" && row.ekey === key)
       .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""))[0];
     if (!current) operations.push({ type: "alias", key, phrase, target, source });
-    else if (current.evalue === target && (current.tags || []).includes("exact-match-only")) {
+    else if (current.evalue === target && hasExactTag(current, "exact-match-only")) {
       skipped.push({ type: "alias", key });
     } else conflicts.push({ type: "alias", key, reason: "existing_alias_mismatch" });
   }

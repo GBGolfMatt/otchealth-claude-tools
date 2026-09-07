@@ -21,3 +21,18 @@ test("seed plan refuses unsafe inventory or a differing existing value", () => {
   assert.equal(plan.conflicts[0].key, key);
   assert.equal(JSON.stringify(plan).includes("different"), false);
 });
+
+test("seed plan requires an exact tag token, not a substring", () => {
+  const { phrase, target } = ALIAS_SEED[0];
+  const plan = planSeed({ ok: true }, [{
+    type: "alias",
+    ekey: normKey(phrase),
+    evalue: target,
+    id: "bad-tag",
+    ts: "1",
+    agent: "cto",
+    tags: "not-exact-match-only",
+  }]);
+  assert.equal(plan.ok, false);
+  assert.equal(plan.conflicts.some((item) => item.key === normKey(phrase)), true);
+});
