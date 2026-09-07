@@ -309,7 +309,16 @@ labelled, in plain words, as not independently verified.
 The point of four engines is **independence**, not throughput. A second opinion
 from the seat that wrote the code is not a second opinion.
 
-Grade these four paragraphs differently, because they are not equally proven.
+Count the engines carefully, because the lanes below are five. Subagents are
+**not** a fifth engine: they run in-session, on the same model family, dispatched
+by the seat that wrote the code and reading the context that seat assembled. They
+are fan-out *within* the Claude Code engine — throughput, which is the thing this
+section just said is not the point. That is exactly why their standing rule is
+never-merge-unread: a lane that shares your priors can multiply a wrong belief as
+fast as a right one. The four engines are Claude Code, ChatGPT, Codex, and
+HyperAgent.
+
+Grade these five paragraphs differently, because they are not equally proven.
 The Claude Code and subagent lanes are what this document was written from, so
 they are described from use. The ChatGPT lane's mechanics were verified live on
 2026-08-29 (an `occ_gpt_cto` authorization-code exchange against
