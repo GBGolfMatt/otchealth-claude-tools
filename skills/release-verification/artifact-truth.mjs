@@ -224,6 +224,13 @@ function parseXmlPlist(text) {
   if (plistAt < 0) {
     fail('is not XML plist content (no <plist> element) and does not start with the bplist00 magic');
   }
+  // Anything before the root element other than whitespace means this file is
+  // not one plist document, and reading "the first <plist> we can find" out of
+  // it is guessing. The declaration, DOCTYPE and comments were already removed
+  // above, so a real Info.plist has only newlines here.
+  if (s.slice(0, plistAt).trim() !== '') {
+    fail(`has ${JSON.stringify(s.slice(0, plistAt).trim().slice(0, 60))} before its <plist> element, so it is not a single plist document`);
+  }
 
   let i = plistAt;
 
@@ -314,7 +321,13 @@ function parseXmlPlist(text) {
         if (t.selfClose) fail('has a self-closing <date/>, which carries no value');
         const raw = readText().trim();
         expectClose('date');
-        return raw;
+        // Normalised to an ISO string so this agrees with the binary reader,
+        // which decodes its 8-byte double the same way. Returning the raw text
+        // here would make the two readers hand back different values for the
+        // same logical document.
+        const d = new Date(raw);
+        if (Number.isNaN(d.getTime())) fail(`has <date>${raw}</date>, which is not a representable instant`);
+        return d.toISOString();
       }
       case 'data': {
         if (t.selfClose) return Buffer.alloc(0);
@@ -332,7 +345,12 @@ function parseXmlPlist(text) {
         }
       }
       case 'dict': {
-        const obj = {};
+        // Null prototype, deliberately. `obj['__proto__'] = v` on an ordinary
+        // object literal sets the PROTOTYPE instead of creating an own key, so
+        // a `<key>__proto__</key>` entry -- perfectly legal in the plist DTD --
+        // would leak its children into every lookup and would also slip past
+        // the duplicate-key check below, since it never becomes an own key.
+        const obj = Object.create(null);
         if (t.selfClose) return obj;
         for (;;) {
           skipSpace();
@@ -363,11 +381,23 @@ function parseXmlPlist(text) {
   if (open.selfClose) fail('has an empty <plist/> element and so declares no keys at all');
   const root = parseValue(0);
   expectClose('plist');
+  // And nothing after it. A partial overwrite of a longer file leaves a whole
+  // second document trailing the first, and stopping at the first </plist>
+  // would report a confident verdict about a file whose real content is
+  // ambiguous. Both ends of this check exist for the same reason: "I read the
+  // part that looked like a plist" is a guess, and guessing is what exit 2 is
+  // for.
+  if (s.slice(i).trim() !== '') {
+    fail(`has ${JSON.stringify(s.slice(i).trim().slice(0, 60))} after its </plist>, so it is not a single plist document`);
+  }
   if (root === null || typeof root !== 'object' || Array.isArray(root) || Buffer.isBuffer(root)) {
     fail('has a root element that is not a <dict>, so it has no keys to check');
   }
   return root;
 }
+
+// Binary plist dates count seconds from 2001-01-01 UTC, not the Unix epoch.
+const APPLE_EPOCH_MS = Date.UTC(2001, 0, 1);
 
 // Small binary-plist reader covering the object types an Info.plist uses.
 function parseBinaryPlist(buf) {
@@ -489,18 +519,65 @@ function parseBinaryPlist(buf) {
       for (let i = 0; i < len; i++) out[i] = obj(readRef(next + i * objRefSize), depth + 1);
       return out;
     }
+    if (high === 0x2) {
+      // Real. 0x22 is a 4-byte float, 0x23 an 8-byte double, both big-endian.
+      const n = 1 << low;
+      if (n !== 4 && n !== 8) throw new Error(`binary plist real claims ${n} bytes, which is neither a float nor a double`);
+      need(pos + 1, n, 'real');
+      return n === 4 ? buf.readFloatBE(pos + 1) : buf.readDoubleBE(pos + 1);
+    }
+    if (high === 0x3) {
+      // Date. An 8-byte big-endian double of seconds since 2001-01-01 UTC.
+      // Normalised to an ISO string so this agrees with the XML reader, which
+      // normalises <date> the same way. Two readers of one logical document
+      // that return different types for the same key are a bug waiting for a
+      // manifest to trip over it.
+      need(pos + 1, 8, 'date');
+      const d = new Date(APPLE_EPOCH_MS + buf.readDoubleBE(pos + 1) * 1000);
+      if (Number.isNaN(d.getTime())) throw new Error('binary plist holds a date that is not a representable instant');
+      return d.toISOString();
+    }
+    if (high === 0x4) {
+      const { len, next } = readLen(pos + 1, low);
+      need(next, len, 'data');
+      return Buffer.from(buf.subarray(next, next + len));
+    }
     if (high === 0xd) {
       const { len, next } = readLen(pos + 1, low);
       need(next, len * objRefSize * 2, 'dictionary');
-      const out = {};
+      // Null prototype for the same reason as the XML reader: `__proto__` is a
+      // legal key, and on an ordinary object it would set the prototype rather
+      // than an own property.
+      const out = Object.create(null);
       for (let i = 0; i < len; i++) {
         const k = obj(readRef(next + i * objRefSize), depth + 1);
+        // A dict key that is not a string would be coerced by `out[k] = v` into
+        // something like "[object Object]" and then compared against a manifest
+        // key as if it were real.
+        if (typeof k !== 'string') throw new Error(`binary plist uses a ${k === null ? 'null' : typeof k} as a dictionary key, which no Info.plist does`);
         const v = obj(readRef(next + len * objRefSize + i * objRefSize), depth + 1);
+        // Matches the XML reader: a duplicated key is a mangled file, and which
+        // value the OS honours is not worth asserting on a coin flip.
+        if (Object.prototype.hasOwnProperty.call(out, k)) {
+          throw new Error(`binary plist declares the key ${JSON.stringify(k)} twice in the same dictionary`);
+        }
         out[k] = v;
       }
       return out;
     }
-    return null; // types this checker never asserts against
+    // Everything else REFUSES. This used to `return null` under the comment
+    // "types this checker never asserts against" -- which reasoned about what
+    // the MANIFEST asserts, not about what the FILE contains, and those are
+    // different questions. A key whose value came back null was still PRESENT,
+    // so `k in plist` was true while its value was a lie: an infoPlist.equals
+    // compared String(null) and fabricated a violation, and a coupling rule
+    // reported "has the key but its value is not a usable purpose string".
+    // Confident, actionable, wrong.
+    //
+    // The three types that actually occur in an Info.plist -- real, date, data
+    // -- are parsed above rather than refused, so this rejects only markers no
+    // Info.plist carries (null, fill, UID, and any future type).
+    throw new Error(`binary plist holds an object with marker 0x${marker.toString(16).padStart(2, '0')}, a type this reader cannot represent; refusing rather than reporting a verdict about a file it only partly understands`);
   }
   return obj(topObject);
 }
@@ -866,18 +943,50 @@ const bundle = inspect('reading the shipped web bundle', () => {
 });
 
 // --- 1. Info.plist expectations -------------------------------------------
+// Every read below goes through plistHas/plistGet, never bare `plist[k]` or
+// `k in plist`. Both readers now build their dicts with a null prototype, which
+// is the structural half of the fix; this is the other half, and both are
+// wanted because either alone leaves the other's assumption load-bearing.
+//
+// What this closes: `__proto__` is a legal plist key that the DTD says nothing
+// against, and `obj['__proto__'] = value` on an ordinary object sets the
+// PROTOTYPE rather than an own property. So a dict under that key never
+// appeared in Object.keys or hasOwnProperty, while every property of its value
+// became visible through the prototype chain to `plist[k]` and to `in`.
+// Reproduced live, both directions, on XML and binary alike:
+//
+//   required:  a `__proto__` dict carrying NSPhotoLibraryAddUsageDescription
+//              printed "ok plist requires ... present" and VERDICT: CLEAN --
+//              a false clean on the exact key behind the iHEARtest TCC crash.
+//   forbidden: the same trick manufactured "NSMicrophoneUsageDescription
+//              PRESENT" for a key that is not a real entry of the plist.
+//
+// capabilityCoupling already guarded with hasOwnProperty. It was one of four
+// places that read the plist by a manifest-supplied key, and the only one.
+const plistHas = (k) => Object.prototype.hasOwnProperty.call(plist, k);
+const plistGet = (k) => (plistHas(k) ? plist[k] : undefined);
+// A short, safe rendering of any plist value. Never throws: with null-prototype
+// dicts, `String(someDict)` raises "Cannot convert object to primitive value",
+// and an unhandled throw here would defeat the exit-code contract as surely as
+// a wrong answer would.
+const describePlistValue = (v) => {
+  if (Buffer.isBuffer(v)) return `<${v.length}-byte data>`;
+  if (v !== null && typeof v === 'object') return Array.isArray(v) ? `<array of ${v.length}>` : '<dict>';
+  return v;
+};
 for (const r of (expect.infoPlist && expect.infoPlist.required) || []) {
-  const v = plist[r.key];
+  const v = plistGet(r.key);
   if (typeof v === 'string' ? v.trim() : v) passes.push(`plist requires ${r.key}: present`);
   else violations.push({ rule: 'infoPlist.required', detail: `${r.key} MISSING`, why: r.why });
 }
 for (const f of (expect.infoPlist && expect.infoPlist.forbidden) || []) {
-  if (f.key in plist) violations.push({ rule: 'infoPlist.forbidden', detail: `${f.key} PRESENT`, why: f.why });
+  if (plistHas(f.key)) violations.push({ rule: 'infoPlist.forbidden', detail: `${f.key} PRESENT`, why: f.why });
   else passes.push(`plist forbids ${f.key}: absent`);
 }
 for (const [k, want] of Object.entries((expect.infoPlist && expect.infoPlist.equals) || {})) {
-  if (String(plist[k]) === String(want)) passes.push(`plist ${k} == ${want}`);
-  else violations.push({ rule: 'infoPlist.equals', detail: `${k} is ${JSON.stringify(plist[k])}, expected ${JSON.stringify(want)}`, why: 'identity/version drift between what was built and what was claimed' });
+  const shown = describePlistValue(plistGet(k));
+  if (String(shown) === String(want)) passes.push(`plist ${k} == ${want}`);
+  else violations.push({ rule: 'infoPlist.equals', detail: `${k} is ${JSON.stringify(shown)}, expected ${JSON.stringify(want)}`, why: 'identity/version drift between what was built and what was claimed' });
 }
 
 // --- 2. Shipped web-bundle expectations -----------------------------------
@@ -887,19 +996,36 @@ if (expect.webBundle) {
   if (bundle.missing) {
     violations.push({ rule: 'webBundle', detail: `declared bundle root not found in the artifact: ${expect.webBundle.root}`, why: 'the manifest describes a bundle layout this build does not produce' });
   } else {
-    const hay = bundle.files.map((f) => `\n/*${f.rel}*/\n${f.text}`).join('');
     // Match with the COMPILED regex. These were compiled during validation but
     // then evaluated with String.includes, so `getUserMedia|mediaDevices` was
     // silently searched for as that literal 24-character string and matched
     // nothing -- a rule that looks like it is guarding and is not.
+    //
+    // BOTH rule families match PER FILE. mustNotContain always did;
+    // mustContain used to test one synthetic haystack built by joining every
+    // shipped file with a `\n/*path*/\n` separator, which let a single rule be
+    // satisfied by text spanning two unrelated files. Reproduced live: a file
+    // ending "...ends oddly with: scrubber" and a different file beginning
+    // ".init();" together satisfied /scrubber[\s\S]{0,40}\.init\(/ and printed
+    // VERDICT: CLEAN, with the pattern present in neither file.
+    //
+    // That is a false clean on a POSITIVE assertion -- a rule whose whole job
+    // is to prove the shipped bundle really does something. It also contradicted
+    // this tool's own rule for capabilityCoupling's andBundleMatches, where both
+    // patterns must hit the SAME file because "two unrelated modules happening
+    // to mention each is not evidence of one flow". Same argument, same answer.
+    //
+    // Per-file matching is also better evidence: the pass line can now name the
+    // file the proof lives in instead of asserting a whole-bundle abstraction.
     for (const c of expect.webBundle.mustNotContain || []) {
       const hits = bundle.files.filter((f) => rx(c.pattern).test(f.text)).map((f) => f.rel);
       if (hits.length) violations.push({ rule: 'webBundle.mustNotContain', detail: `${c.pattern} found in ${hits.slice(0, 4).join(', ')}`, why: c.why });
       else passes.push(`bundle excludes ${c.pattern}`);
     }
     for (const c of expect.webBundle.mustContain || []) {
-      if (rx(c.pattern).test(hay)) passes.push(`bundle contains ${c.pattern}`);
-      else violations.push({ rule: 'webBundle.mustContain', detail: `${c.pattern} NOT found in the shipped bundle`, why: c.why });
+      const hits = bundle.files.filter((f) => rx(c.pattern).test(f.text)).map((f) => f.rel);
+      if (hits.length) passes.push(`bundle contains ${c.pattern} (in ${hits.slice(0, 3).join(', ')})`);
+      else violations.push({ rule: 'webBundle.mustContain', detail: `${c.pattern} NOT found in any single shipped file`, why: c.why });
     }
   }
 }

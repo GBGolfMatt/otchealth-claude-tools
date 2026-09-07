@@ -31,8 +31,13 @@ number). (There are two projects named
 because the tally has to account for every project the API returns.)
 
 The count is of runs the account still returns, so a run aged out of retention
-would not appear. Read it as *every run visible to us*, which is what the claim
-needs: nobody has scripted anything.
+would not appear. That bounds what this number can support. It shows **no
+scripted device testing in use** — a scripted suite anyone actually relied on
+would put recent runs in this window — and it does *not* show that nobody ever
+scripted a run. An earlier draft stated the retention caveat and then walked it
+back in the same sentence ("which is what the claim needs: nobody has scripted
+anything"), which is the overclaim this document exists to argue against,
+committed in its own evidence file.
 
 ## Device and network-profile inventory
 

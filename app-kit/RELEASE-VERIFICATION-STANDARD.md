@@ -206,8 +206,9 @@ Today the fleet's only real-device testing is the AWS Device Farm **built-in
 fuzz suite**: random input, 20-minute budget. Across all 21 Device Farm runs
 the account still returns — iHEARtest, AWARE, Flatstick, PlantID — **every
 single one was `BUILTIN_FUZZ`: zero scripted runs among them.** A run aged out
-of retention would not appear, so read it as every run visible to us, which is
-what the claim needs: nobody has scripted anything. Same scope qualification as
+of retention would not appear, so this supports **no scripted device testing in
+use** — a suite anyone relied on would leave recent runs — rather than the
+historical claim that nobody ever scripted one. Same scope qualification as
 `receipts/DEVICE-FARM-CENSUS.md`, which is the evidence for this paragraph.
 
 Random testing is not a gate, it is a lottery. The TCC crash is present in the source of 16 tagged
@@ -259,9 +260,9 @@ compatibility probe without an `appArn` returns HTTP 200 and `compatible=0` for
 case that caught it.
 
 Two standing limits: the census counts runs the account still returns, so read
-"21" as *every run visible to us* (which is what the claim needs — nobody has
-scripted anything), and device and profile inventories are AWS's to change, so
-re-run rather than quoting a year from now.
+"21" as *every run visible to us* (enough for "no scripted device testing in
+use", not for "nobody ever scripted one"), and device and profile inventories
+are AWS's to change, so re-run rather than quoting a year from now.
 
 **Read Device Farm results correctly.** Two traps, both hit for real:
 

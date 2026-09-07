@@ -1128,6 +1128,14 @@ function bplist(objects, topObject = 0) {
         if (o.type === 'dict') {
             return Buffer.concat([hdr(0xd0, o.keys.length), Buffer.from(o.keys), Buffer.from(o.values)]);
         }
+        // An arbitrary single marker byte, for testing object types the reader
+        // is supposed to refuse. The first draft of that test poked a marker
+        // into a finished buffer by searching for the string next to it, which
+        // silently hit the extended-LENGTH byte instead (a 15-char value does
+        // not fit the low nibble) and produced a truncation error rather than
+        // the type refusal under test. Say what you mean at the point the bytes
+        // are written instead of computing an offset into them afterwards.
+        if (o.type === 'raw') return Buffer.from([o.marker]);
         throw new Error(`unhandled fixture type ${o.type}`);
     });
     const offsets = [];
@@ -1496,4 +1504,220 @@ test('integers, dates, data and comments in a real-shaped plist all parse', () =
     });
     const { code, out } = run(ipa, manifest);
     assert.equal(code, 0, out);
+});
+
+// --- the two readers must agree about the same logical document -------------
+// XML and binary are two decoders of one format. When they disagree, at least
+// one is wrong, and the disagreement is invisible in tests that only ever feed
+// one of them. This section exists because hardening the XML reader ALONE
+// created exactly that split: XML learned to parse <real>/<date>/<data> and to
+// refuse duplicate keys, while the binary reader -- the branch every real IPA
+// takes -- still returned null for those types and silently overwrote
+// duplicates.
+//
+// `return null` was the specific defect, and its comment was the tell: "types
+// this checker never asserts against" reasons about what the MANIFEST asserts,
+// not about what the FILE contains. A null-valued key is still PRESENT, so
+// `k in plist` was true while the value was a lie.
+
+test('a binary plist with an unrepresentable object type is exit 2, not a null-valued key', () => {
+    // Marker 0x80 is a UID, which appears in keyed archives and never in an
+    // Info.plist. Before the fix it came back as null, and the equals check
+    // then compared String(null) and announced drift -- a fabricated violation
+    // sourced entirely from the reader's own shrug.
+    const buf = bplist([
+        { type: 'dict', keys: [1], values: [2] },
+        { type: 'ascii', value: 'CFBundleIdentifier' },
+        { type: 'raw', marker: 0x80 },
+    ]);
+    const ipa = makeIpa({ rawPlist: buf });
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, `an unreadable object type must be exit 2, got ${code}: ${out}`);
+    assert.match(out, /cannot represent/);
+    assert.doesNotMatch(out, /expected "com\.fixture\.app"/, 'must not report drift sourced from its own unread value');
+});
+
+test('a binary plist that declares a key twice is exit 2, matching the XML reader', () => {
+    const buf = bplist([
+        { type: 'dict', keys: [1, 2], values: [3, 4] },
+        { type: 'ascii', value: 'CFBundleIdentifier' },
+        { type: 'ascii', value: 'CFBundleIdentifier' },
+        { type: 'ascii', value: 'com.fixture.app' },
+        { type: 'ascii', value: 'com.fixture.other' },
+    ]);
+    const ipa = makeIpa({ rawPlist: buf });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /twice in the same dictionary/);
+});
+
+// --- a plist file must be ONE plist document -------------------------------
+// The reader locates the root by searching for the first <plist>, which means
+// leading junk was skipped and trailing junk was ignored. A partial overwrite
+// of a longer file leaves a whole second document behind the first, and
+// stopping at the first </plist> reports a confident verdict about a file whose
+// real content is ambiguous.
+
+test('content before the <plist> element is exit 2, not a verdict about the part that parsed', () => {
+    const ipa = makeIpa({
+        rawPlist: `some other file's tail\n${plistXml(BASE_PLIST)}`,
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /before its <plist> element/);
+});
+
+test('a second document concatenated after </plist> is exit 2', () => {
+    // The realistic shape: a shorter plist written over a longer one without
+    // truncating. The first document is complete and parses perfectly, which is
+    // exactly why stopping there is dangerous.
+    const ipa = makeIpa({
+        rawPlist: `${plistXml(BASE_PLIST)}${plistXml({ CFBundleIdentifier: 'com.fixture.stale' })}`,
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, `a concatenated second document must be exit 2, got ${code}: ${out}`);
+    assert.match(out, /after its <\/plist>/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('trailing whitespace after </plist> is still fine', () => {
+    // The false-positive guard: every real plist ends with a newline.
+    const ipa = makeIpa({ rawPlist: `${plistXml(BASE_PLIST)}\n\n  \n` });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 0, out);
+});
+
+// --- `__proto__` is a legal plist key and JS treats it as a trapdoor --------
+// `obj['__proto__'] = value` on an ordinary object sets the PROTOTYPE, not an
+// own property. So a `<key>__proto__</key>` entry -- which the plist DTD says
+// nothing against -- never appears in Object.keys or hasOwnProperty, while
+// every property of its value becomes visible through the prototype chain to
+// `plist[k]` and to `k in plist`.
+//
+// Three of the four places that read the plist by a manifest-supplied key used
+// exactly those unguarded forms. `capabilityCoupling` was the only one that
+// guarded with hasOwnProperty, which is what makes this a miss rather than an
+// oversight: the pattern was known and applied once.
+//
+// Both directions were reproduced live before the fix, on XML and binary alike.
+
+const PROTO_HEAD = '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>CFBundleIdentifier</key><string>com.fixture.app</string>\n';
+
+test('a __proto__ key cannot satisfy infoPlist.required', () => {
+    // The false CLEAN, on the exact key behind the iHEARtest TCC crash.
+    const ipa = makeIpa({
+        rawPlist: `${PROTO_HEAD}  <key>__proto__</key>\n  <dict><key>NSPhotoLibraryAddUsageDescription</key><string>INJECTED</string></dict>\n</dict>\n</plist>\n`,
+    });
+    const manifest = makeManifest({
+        infoPlist: { required: [{ key: 'NSPhotoLibraryAddUsageDescription', why: 'the TCC crash' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, `a prototype-injected key is not a shipped key; got ${code}: ${out}`);
+    assert.match(out, /NSPhotoLibraryAddUsageDescription MISSING/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('a __proto__ key cannot manufacture an infoPlist.forbidden violation', () => {
+    // The other direction: a fabricated finding about a key that is not a real
+    // entry of the shipped plist.
+    const ipa = makeIpa({
+        rawPlist: `${PROTO_HEAD}  <key>__proto__</key>\n  <dict><key>NSMicrophoneUsageDescription</key><string>INJECTED</string></dict>\n</dict>\n</plist>\n`,
+    });
+    const manifest = makeManifest({
+        infoPlist: { forbidden: [{ key: 'NSMicrophoneUsageDescription', why: 'this build must not ask for the mic' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, `a prototype-injected key must not be reported PRESENT; got ${code}: ${out}`);
+    assert.match(out, /forbids NSMicrophoneUsageDescription: absent/);
+});
+
+test('a __proto__ key cannot reach capabilityCoupling either', () => {
+    // This path already guarded with hasOwnProperty, so it is a lock rather
+    // than a repair -- but the guard now has to survive the null-prototype
+    // dicts too, and a test is cheaper than remembering that.
+    const ipa = makeIpa({
+        rawPlist: `${PROTO_HEAD}  <key>__proto__</key>\n  <dict><key>NSMicrophoneUsageDescription</key><string>INJECTED</string></dict>\n</dict>\n</plist>\n`,
+        web: { 'js/mic.js': 'navigator.mediaDevices.getUserMedia({ audio: true })' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /does NOT declare NSMicrophoneUsageDescription/);
+});
+
+test('a real key literally named __proto__ is read as an ordinary key', () => {
+    // The false-positive guard. The fix must not make `__proto__` unreadable,
+    // only ordinary: with a null-prototype dict it becomes a normal own key,
+    // which is what the plist file actually says it is.
+    const ipa = makeIpa({
+        rawPlist: `${PROTO_HEAD}  <key>__proto__</key><string>just a string</string>\n</dict>\n</plist>\n`,
+    });
+    // The equals map is built with JSON.parse, NOT an object literal. In a
+    // literal, `{ __proto__: 'x' }` is prototype-setting SYNTAX and creates no
+    // key at all -- the first draft of this test did exactly that, so it
+    // asserted nothing and passed against the unfixed tool too. A regression
+    // test that passes before the fix is not a regression test, and here the
+    // fixture had fallen into the very trap the test is about.
+    const equals = JSON.parse('{"__proto__":"just a string","CFBundleIdentifier":"com.fixture.app"}');
+    assert.ok(Object.prototype.hasOwnProperty.call(equals, '__proto__'), 'fixture must carry a REAL __proto__ key');
+    const manifest = makeManifest({ infoPlist: { equals } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+});
+
+test('a dict-valued key reported by infoPlist.equals does not crash the run', () => {
+    // Null-prototype objects have no toString, so `String(someDict)` throws
+    // "Cannot convert object to primitive value". An unhandled throw here would
+    // defeat the exit-code contract as surely as a wrong answer would.
+    const ipa = makeIpa({
+        rawPlist: `${PROTO_HEAD}  <key>UIApplicationSceneManifest</key><dict><key>a</key><string>b</string></dict>\n</dict>\n</plist>\n`,
+    });
+    const manifest = makeManifest({ infoPlist: { equals: { UIApplicationSceneManifest: 'something' } } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, `a dict-valued key must report drift, not crash; got ${code}: ${out}`);
+    assert.match(out, /UIApplicationSceneManifest is "<dict>"/);
+});
+
+// --- mustContain must match inside ONE file --------------------------------
+// It used to test a synthetic haystack built by joining every shipped file with
+// a `\n/*path*/\n` separator, so a rule could be satisfied by text spanning two
+// unrelated files. mustNotContain was already per-file; the two families were
+// inconsistently scoped inside the same block.
+
+test('mustContain is not satisfied by a match spanning two unrelated files', () => {
+    const ipa = makeIpa({
+        webRoot: 'public',
+        plist: BASE_PLIST,
+        web: {
+            'a-unrelated.js': '// setup code, ends oddly with: scrubber',
+            'z-other.js': '.init(); // a different file entirely',
+        },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public', mustContain: [{ pattern: 'scrubber[\\s\\S]{0,40}\\.init\\(', why: 'the scrubber must be wired up' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, `a cross-file match is not evidence the bundle does the thing; got ${code}: ${out}`);
+    assert.match(out, /NOT found in any single shipped file/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('mustContain still passes on a real single-file match, and names the file', () => {
+    // The false-positive guard, plus the reason per-file is better evidence:
+    // the pass line can point at where the proof lives.
+    const ipa = makeIpa({
+        webRoot: 'public',
+        plist: BASE_PLIST,
+        web: { 'js/native.js': 'async function cioConsentGranted() { return true; }', 'js/other.js': 'noop();' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public', mustContain: [{ pattern: 'cioConsentGranted', why: 'telemetry must be consent-gated' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+    assert.match(out, /bundle contains cioConsentGranted \(in js[/\\]native\.js\)/);
 });
