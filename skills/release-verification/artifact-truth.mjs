@@ -331,6 +331,41 @@ function parseBinaryPlist(buf) {
 
 // Read every shipped text file under the app bundle once, so bundle rules and
 // capability coupling scan the SAME bytes the device runs.
+// The STRING-level half of the webBundle.root checks. Split out so it can run
+// during manifest validation, BEFORE the artifact is touched: a bad root is a
+// broken manifest, and reporting it as "ARTIFACT UNREADABLE" was the exact
+// mislabel the exit 2 / exit 3 split exists to end. These four checks need only
+// the manifest and the .app path, so they are knowable without reading a byte
+// of the build.
+//
+// The FIFTH check -- resolving symlinks with realpath -- stays inside
+// readShippedText, because whether the root resolves out of the bundle depends
+// on symlinks the ARCHIVE carries. That one genuinely is a fact about the
+// artifact, so it stays exit 2. The seam is "could I know this from the
+// manifest alone?", not "is it about a path?".
+// `appDir` is optional: at manifest-validation time the artifact has not been
+// extracted yet, so a synthetic base stands in. That is sound because the
+// containment check is purely lexical here -- a relative path with no ".."
+// segment resolves inside ANY base -- and the real base is re-checked later
+// with the actual appDir.
+function validateWebRootString(subdir, appDir = path.sep + '__unextracted__') {
+  if (subdir === undefined || subdir === null) return;
+  if (typeof subdir !== 'string' || subdir.trim() === '') {
+    throw new Error(`webBundle.root must be a non-empty string (got ${JSON.stringify(subdir)})`);
+  }
+  if (path.isAbsolute(subdir) || /^[A-Za-z]:/.test(subdir)) {
+    throw new Error(`webBundle.root "${subdir}" is an absolute path; it must be relative to the shipped .app`);
+  }
+  if (subdir.split(/[\\/]/).includes('..')) {
+    throw new Error(`webBundle.root "${subdir}" contains a ".." segment, which would scan files outside the shipped .app`);
+  }
+  const resolvedRoot = path.resolve(appDir, subdir);
+  const base = path.resolve(appDir);
+  if (resolvedRoot !== base && !resolvedRoot.startsWith(base + path.sep)) {
+    throw new Error(`webBundle.root "${subdir}" resolves outside the shipped .app (${resolvedRoot}); only bytes from the artifact may inform a verdict`);
+  }
+}
+
 function readShippedText(appDir, subdir) {
   // The artifact boundary is the whole contract: this tool's verdicts are only
   // worth anything if every byte behind them came out of the .app that shipped.
@@ -358,22 +393,7 @@ function readShippedText(appDir, subdir) {
   // So the third check resolves real paths (`fs.realpathSync`) for the root and
   // for every symlinked entry encountered during the walk, and requires each to
   // stay inside the real appDir.
-  if (subdir !== undefined && subdir !== null) {
-    if (typeof subdir !== 'string' || subdir.trim() === '') {
-      throw new Error(`webBundle.root must be a non-empty string (got ${JSON.stringify(subdir)})`);
-    }
-    if (path.isAbsolute(subdir) || /^[A-Za-z]:/.test(subdir)) {
-      throw new Error(`webBundle.root "${subdir}" is an absolute path; it must be relative to the shipped .app`);
-    }
-    if (subdir.split(/[\\/]/).includes('..')) {
-      throw new Error(`webBundle.root "${subdir}" contains a ".." segment, which would scan files outside the shipped .app`);
-    }
-    const resolvedRoot = path.resolve(appDir, subdir);
-    const base = path.resolve(appDir);
-    if (resolvedRoot !== base && !resolvedRoot.startsWith(base + path.sep)) {
-      throw new Error(`webBundle.root "${subdir}" resolves outside the shipped .app (${resolvedRoot}); only bytes from the artifact may inform a verdict`);
-    }
-  }
+  validateWebRootString(subdir, appDir);
   const root = subdir ? path.join(appDir, subdir) : appDir;
   const files = [];
   if (!fs.existsSync(root)) return { root, files, missing: true };
@@ -534,6 +554,30 @@ const compiled = configError(`validating rules in ${manifestPath}`, () => {
     patterns.set(RENDERED_VERSION_KEY, new RegExp(`<[^>]*\\bid\\s*=\\s*["']${escapeForRegExp(id)}["'][^>]*>([^<]*)<`));
   }
   return patterns;
+});
+
+// Manifest-level webBundle.root validation, BEFORE the artifact is opened.
+// Round 24 caught that these ran inside the artifact-reading inspect(), so a
+// manifest with an absolute or traversing root still printed ARTIFACT
+// UNREADABLE -- the very mislabel the exit 2 / exit 3 split had just been made
+// to remove. Fixing the handler without moving these left the contract only
+// half true, which is how a correction gets believed while still being wrong.
+configError(`validating webBundle.root in ${manifestPath}`, () => {
+  const expectBlock = manifest.expect || {};
+  validateWebRootString(expectBlock.webBundle && expectBlock.webBundle.root);
+  const readsBundle = Boolean(
+    expectBlock.renderedVersion ||
+    (expectBlock.capabilityCoupling || []).length ||
+    ((expectBlock.webBundle && expectBlock.webBundle.mustContain) || []).length ||
+    ((expectBlock.webBundle && expectBlock.webBundle.mustNotContain) || []).length,
+  );
+  if (readsBundle && !(expectBlock.webBundle && expectBlock.webBundle.root)) {
+    throw new Error(
+      'this manifest has rules that read the shipped bundle but does not set webBundle.root, ' +
+      'so the scan would walk the entire .app rather than the web payload those rules describe. ' +
+      'Set webBundle.root (usually "public").',
+    );
+  }
 });
 const rx = (source) => compiled.get(source);
 const violations = [];

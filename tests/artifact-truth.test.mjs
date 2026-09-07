@@ -827,7 +827,7 @@ test('a webBundle.root with ".." cannot escape the shipped .app', () => {
         capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
     });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 2, out);
+    assert.equal(code, 3, out);
     assert.match(out, /\.\.".{0,40}segment|outside the shipped \.app/);
     assert.doesNotMatch(out, /VERDICT: CLEAN/);
 });
@@ -841,7 +841,7 @@ test('a nested ".." inside an otherwise normal root is refused too', () => {
         renderedVersion: { file: 'index.html', elementId: 'app-version-tag' },
     });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 2, out);
+    assert.equal(code, 3, out);
     assert.doesNotMatch(out, /VERDICT: CLEAN/);
 });
 
@@ -852,7 +852,7 @@ test('an absolute webBundle.root is refused', () => {
         capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
     });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 2, out);
+    assert.equal(code, 3, out);
     assert.match(out, /absolute path/);
 });
 
@@ -1001,7 +1001,7 @@ test('capabilityCoupling with no webBundle.root is refused outright', () => {
         capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
     });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 2, out);
+    assert.equal(code, 3, out);
     assert.match(out, /does not set webBundle\.root/);
     assert.doesNotMatch(out, /VERDICT: CLEAN/);
 });
@@ -1033,10 +1033,10 @@ test('renderedVersion with no root and no scanned files exits 2', () => {
     assert.equal(run(ipa, manifest).code, 2);
 });
 
-test('webBundle rules with no root and no scanned files exit 2', () => {
+test('webBundle rules with no root and no scanned files exit 3 (manifest error, not an unreadable artifact)', () => {
     const ipa = makeIpa({ plist: BASE_PLIST, web: {} });
     const manifest = makeManifest({ webBundle: { mustNotContain: [{ pattern: 'getUserMedia' }] } });
-    assert.equal(run(ipa, manifest).code, 2);
+    assert.equal(run(ipa, manifest).code, 3);
 });
 
 test('a plist-only manifest still passes with no scanned files', () => {
@@ -1259,4 +1259,25 @@ test('two top-level .app bundles is exit 2, not a clean verdict about whichever 
     assert.match(out, /2 top-level \.app bundles/);
     assert.match(out, /App\.app/);
     assert.match(out, /AppWatch\.app/, 'both bundles should be named so the archive can be fixed');
+});
+
+test('a bad webBundle.root is refused before the artifact is even opened', () => {
+    // Round 24: the root checks lived inside the artifact-reading inspect(), so
+    // a manifest error still printed ARTIFACT UNREADABLE. Ordering is the proof
+    // that the fix is real rather than a relabel: point --ipa at a file that
+    // does not exist AND give a traversing root. If the root is validated
+    // first, the message names the root; if the artifact is opened first, it
+    // complains about the missing file instead.
+    // A rule that is otherwise VALID, so the only thing wrong is the root. The
+    // first draft used a renderedVersion missing elementId, which tripped rule
+    // compilation first and proved nothing about ordering.
+    const manifest = makeManifest({
+        webBundle: { root: '../../etc' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run('/nonexistent/never-created.ipa', manifest);
+    assert.equal(code, 3, `manifest error must be exit 3, got ${code}: ${out}`);
+    assert.match(out, /VERIFIER MISCONFIGURED/);
+    assert.match(out, /webBundle\.root/, 'the message must name the manifest field, not the missing file');
+    assert.doesNotMatch(out, /ARTIFACT UNREADABLE/);
 });
