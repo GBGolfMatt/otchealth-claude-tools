@@ -43,7 +43,7 @@ import { writeAdvisory, RING_DENY } from "./dedupe.mjs";
 import { parseNdjson, serializeNdjson, nextId, isConflict, condHeaders } from "./blobwrite.mjs";
 import { kvSecret } from "./azure-secret.mjs";
 import { linkFields, walkGraph, formatEdge } from "./entity-graph.mjs";
-import { buildAliasEntry } from "./entity-alias.mjs";
+import { assertAliasOwner, buildAliasEntry } from "./entity-alias.mjs";
 import { getTextFromS3, getTextMetaFromS3, putObjectToS3, listBlobsFromS3, s3Configured } from "./s3-blob.mjs";
 import { awsCredsPresent } from "./aws-secret.mjs";
 import { FAILED_WRITE_FILE, appendFailedWriteFallback } from "./local-fallback.mjs";
@@ -638,6 +638,9 @@ async function entityCmd() {
   if (sub === "alias") {
     const from = normKey(positional[1] || ""), to = normKey(positional[2] || "");
     if (!from || !to) { console.error('usage: mem.mjs entity alias "<from-phrasing>" <to-canonical-key> --agent <a> [--source "..."] [--share]'); process.exit(2); }
+    // Alias routing controls deterministic recall. Only the target lane owner may change it:
+    // a cross-lane append without a supersedes pointer could still win latest-by-timestamp lookup.
+    assertAliasOwner(AGENT, ON);
     let fromRef, toRef, prevRef;
     const { entry } = await commitAppend((freshRows) => {
       fromRef = normKey(positional[1] || "");
@@ -652,7 +655,6 @@ async function entityCmd() {
         tags: TAGS,
         by: AGENT,
         source: SOURCE || undefined,
-        supersedePrevious: !CROSS,
       });
       prevRef = built.previous;
       return built.entry;

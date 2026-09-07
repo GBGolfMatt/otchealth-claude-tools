@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildAliasEntry, currentAlias } from "../skills/kb-memory/entity-alias.mjs";
+import { assertAliasOwner, buildAliasEntry, currentAlias } from "../skills/kb-memory/entity-alias.mjs";
 
 const alias = (id, ts, from, to) => ({
   id,
@@ -20,7 +20,7 @@ test("currentAlias selects only the latest row for the same alias key", () => {
   assert.equal(currentAlias(rows, "current_brain_backend")?.id, "a3");
 });
 
-test("buildAliasEntry preserves history by superseding only the prior same-key alias", () => {
+test("buildAliasEntry supersedes only the prior same-key alias", () => {
   const rows = [
     alias("a1", "2026-09-01T00:00:00Z", "current_brain_backend", "old_key"),
     alias("a2", "2026-09-04T00:00:00Z", "other_alias", "unrelated_key"),
@@ -33,7 +33,6 @@ test("buildAliasEntry preserves history by superseding only the prior same-key a
     tags: ["current-value"],
     by: "cto",
     source: "bounded fast eval",
-    supersedePrevious: true,
   });
   assert.equal(previous?.id, "a1");
   assert.equal(entry.supersedes, "a1");
@@ -43,19 +42,16 @@ test("buildAliasEntry preserves history by superseding only the prior same-key a
   assert.equal(entry.evalue, "otchealth_brain_backend");
 });
 
-test("cross-lane alias suggestions cannot supersede the owner row", () => {
-  const rows = [alias("owner", "2026-09-01T00:00:00Z", "current_brain_backend", "owner_key")];
-  const { entry } = buildAliasEntry(rows, {
-    fromKey: "current_brain_backend",
-    toKey: "suggested_key",
-    id: "cross",
-    ts: "2026-09-02T00:00:00Z",
-    tags: [],
-    by: "developer",
-    supersedePrevious: false,
-  });
-  assert.equal(entry.supersedes, undefined);
-  assert.equal(entry.was, undefined);
+test("alias routing rejects cross-lane writers before a row is built", () => {
+  assert.doesNotThrow(() => assertAliasOwner("CTO", "cto"));
+  assert.throws(
+    () => assertAliasOwner("developer", "cto"),
+    /target ledger owner/,
+  );
+  assert.throws(
+    () => assertAliasOwner("cto", "clo-personal"),
+    /target ledger owner/,
+  );
 });
 
 test("shared current-value aliases stay scoped and do not use historical or generic keys", () => {

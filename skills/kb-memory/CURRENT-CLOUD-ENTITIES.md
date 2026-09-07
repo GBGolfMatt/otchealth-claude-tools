@@ -4,6 +4,14 @@ These commands are a reviewed data plan. Do not run them from CI or as part of i
 Re-read live AWS metadata immediately before execution. The values below were verified on 2026-09-07
 from ECS, OpenSearch, RDS, and the gateway health evidence recorded by the CTO seat.
 
+Before any write, run the bounded inventory wrapper. It invokes the supported `entity list`
+CLI with stdout captured in memory and emits only the owner, counts, the four approved canonical keys,
+and their current row IDs. It never logs entity values or unrelated alias names.
+
+```text
+node skills/kb-memory/entity-inventory.mjs
+```
+
 The four canonical current-value rows are:
 
 ```text
@@ -32,4 +40,6 @@ The gateway currently performs containment matching after exact matching. A hist
 literally embeds one of the full current-only phrases above can still trigger current-value promotion.
 Do not execute the alias commands until the gateway either treats these aliases as exact-only or adds
 a tested historical-intent guard. Historical Azure records remain in the ledger and document corpus.
-Entity writes supersede only an earlier row with the same canonical key.
+Entity writes supersede only an earlier row with the same canonical key. Alias writes are owner-only;
+`--agent <writer> --on <other-lane>` is rejected before storage access, and `clo-personal --share`
+continues to be held in the private lane by the existing shared-feed gate.

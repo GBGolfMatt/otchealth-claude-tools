@@ -1,10 +1,18 @@
 /**
- * Pure construction helpers for entity alias ledger rows.
+ * Pure validation and construction helpers for entity alias ledger rows.
  *
  * The caller resolves and validates both keys against fresh ledger rows before calling this module.
- * Keeping row construction pure makes the latest-same-key supersession contract testable without
- * storage credentials or network calls.
+ * Keeping policy and row construction pure makes the owner and latest-same-key contracts testable
+ * without storage credentials or network calls.
  */
+
+export function assertAliasOwner(writer, targetOwner) {
+  const actor = String(writer || "").trim().toLowerCase();
+  const owner = String(targetOwner || "").trim().toLowerCase();
+  if (!actor || !owner || actor !== owner) {
+    throw new Error("entity aliases must be written by the target ledger owner");
+  }
+}
 
 export function currentAlias(rows, fromKey) {
   return rows
@@ -24,8 +32,8 @@ export function buildAliasEntry(rows, input) {
     tags: [...(input.tags || [])],
     by: input.by,
     source: input.source || undefined,
-    was: input.supersedePrevious && previous ? previous.evalue : undefined,
-    supersedes: input.supersedePrevious && previous ? previous.id : undefined,
+    was: previous ? previous.evalue : undefined,
+    supersedes: previous ? previous.id : undefined,
   };
   return { entry, previous };
 }
