@@ -551,6 +551,11 @@ function parseBinaryPlist(buf) {
       return n === 4 ? buf.readFloatBE(pos + 1) : buf.readDoubleBE(pos + 1);
     }
     if (high === 0x3) {
+      // A date is marker 0x33 exactly -- the low nibble is not a length here,
+      // it is part of the type. Accepting any 0x3n and then reading 8 bytes
+      // regardless would parse 0x30 as a date and hand back a verdict built on
+      // a byte sequence the format never said was one.
+      if (marker !== 0x33) throw new Error(`binary plist holds marker 0x${marker.toString(16).padStart(2, '0')}, which is not the 0x33 a date must be`);
       // Date. An 8-byte big-endian double of seconds since 2001-01-01 UTC.
       // Normalised to an ISO string so this agrees with the XML reader, which
       // normalises <date> the same way. Two readers of one logical document
@@ -1003,18 +1008,70 @@ const describePlistValue = (v) => {
 // capabilityCoupling already guarded with hasOwnProperty. It was one of four
 // places that read the plist by a manifest-supplied key, and the only one.
 for (const r of (expect.infoPlist && expect.infoPlist.required) || []) {
+  // Presence is hasOwnProperty, NOT truthiness. This used to read
+  //
+  //     if (typeof v === 'string' ? v.trim() : v)
+  //
+  // so any FALSY value counted as absent, and plists are full of legitimately
+  // falsy values. Reproduced: `ITSAppUsesNonExemptEncryption: false` -- one of
+  // the most common keys in the fleet, added precisely so App Store Connect
+  // stops asking on every build -- was reported MISSING while sitting right
+  // there with the correct value. An integer 0 did the same. Anyone writing the
+  // natural required rule for that key would have had every build blocked by a
+  // fabricated finding.
+  //
+  // The string-trim check is still wanted, because a blank purpose string is
+  // not a disclosure. But blank-when-present and absent are DIFFERENT defects
+  // with different fixes, and reporting them with one message sends half the
+  // readers to the wrong place. Say which one it is.
   const v = plistGet(r.key);
-  if (typeof v === 'string' ? v.trim() : v) passes.push(`plist requires ${r.key}: present`);
-  else violations.push({ rule: 'infoPlist.required', detail: `${r.key} MISSING`, why: r.why });
+  if (!plistHas(r.key)) {
+    violations.push({ rule: 'infoPlist.required', detail: `${r.key} MISSING`, why: r.why });
+  } else if (typeof v === 'string' && v.trim() === '') {
+    violations.push({ rule: 'infoPlist.required', detail: `${r.key} is present but its string value is blank`, why: r.why });
+  } else {
+    passes.push(`plist requires ${r.key}: present`);
+  }
 }
 for (const f of (expect.infoPlist && expect.infoPlist.forbidden) || []) {
   if (plistHas(f.key)) violations.push({ rule: 'infoPlist.forbidden', detail: `${f.key} PRESENT`, why: f.why });
   else passes.push(`plist forbids ${f.key}: absent`);
 }
 for (const [k, want] of Object.entries((expect.infoPlist && expect.infoPlist.equals) || {})) {
-  const shown = describePlistValue(plistGet(k));
-  if (String(shown) === String(want)) passes.push(`plist ${k} == ${want}`);
-  else violations.push({ rule: 'infoPlist.equals', detail: `${k} is ${JSON.stringify(shown)}, expected ${JSON.stringify(want)}`, why: 'identity/version drift between what was built and what was claimed' });
+  const actual = plistGet(k);
+  // describePlistValue is for MESSAGES. Comparing against it was a live false
+  // CLEAN, and it was introduced here by the fix that added the helper: the
+  // comparison read
+  //
+  //     if (String(describePlistValue(plistGet(k))) === String(want))
+  //
+  // and describePlistValue returns the literal '<dict>' for EVERY dict
+  // regardless of content. So `equals: { NSAppTransportSecurity: "<dict>" }`
+  // passed for any ATS configuration whatsoever. Reproduced: a locked-down
+  // NSAllowsArbitraryLoads:false and a wide-open true with an injected
+  // exception domain produced byte-identical "ok" lines and CLEAN verdicts.
+  // Arrays were gated only on LENGTH, so two CFBundleURLTypes arrays with
+  // different schemes compared equal.
+  //
+  // The trap it sets is worse than the single wrong verdict: an author who
+  // writes the real intended content sees the rule fail forever (real content
+  // never equals '<dict>'), and the obvious way to "fix" a rule that will not
+  // pass is to paste in the summary string the tool itself printed -- at which
+  // point the rule is permanently satisfied by anything of that shape.
+  //
+  // equals compares SCALARS. A structured value is not something string
+  // equality can answer, so say that instead of pretending to answer it. This
+  // can never produce a pass, which is the property that matters.
+  if (actual !== null && typeof actual === 'object') {
+    violations.push({
+      rule: 'infoPlist.equals',
+      detail: `${k} holds ${describePlistValue(actual)}, which infoPlist.equals cannot compare against ${JSON.stringify(want)}`,
+      why: 'infoPlist.equals compares scalar values; pinning the contents of a structured key needs a rule that reads inside it, and comparing against a printed summary of the value would pass for any content of that shape',
+    });
+    continue;
+  }
+  if (String(actual) === String(want)) passes.push(`plist ${k} == ${want}`);
+  else violations.push({ rule: 'infoPlist.equals', detail: `${k} is ${JSON.stringify(describePlistValue(actual))}, expected ${JSON.stringify(want)}`, why: 'identity/version drift between what was built and what was claimed' });
 }
 
 // --- 2. Shipped web-bundle expectations -----------------------------------
@@ -1068,7 +1125,13 @@ if (expect.webBundle) {
       // "NOT found in any single shipped file" is TRUE either way, and that is
       // the problem: it reads as "absent" when the honest answer may be
       // "present, but not where this rule can see it". So say which one it is.
-      const joined = bundle.files.map((f) => `\n/*${f.rel}*/\n${f.text}`).join('');
+      // Join the TEXTS only. An earlier version glued them with a
+      // `\n/*<path>*/\n` separator carrying each file's own relative path, so a
+      // pattern matching a filename matched the tool's own bookkeeping: a
+      // single-file bundle with a pattern of `share\.js` fired a note claiming
+      // a match "across file boundaries" when there was one file, one boundary,
+      // and the matched bytes were never in the app at all.
+      const joined = bundle.files.map((f) => f.text).join('\n');
       if (rx(c.pattern).test(joined)) {
         notes.push(
           `webBundle.mustContain ${c.pattern}: matches the shipped payload only ACROSS file boundaries, never within one file. ` +
@@ -1165,7 +1228,14 @@ for (const rule of expect.capabilityCoupling || []) {
   if (present && !declared) {
     violations.push({
       rule: 'capabilityCoupling',
-      detail: `Info.plist has ${rule.requirePlistKey} but its value is not a usable purpose string (${JSON.stringify(raw)})`,
+      // describePlistValue, not the raw value: JSON.stringify THROWS on a
+      // BigInt, which the signed 8-byte integer path can legitimately return.
+      // That threw uncaught and exited 1 -- the same code an honest violation
+      // uses -- printing a stack trace instead of this finding. This was the
+      // fourth site where a plist value reaches JSON.stringify, and the commit
+      // that added describePlistValue to guard exactly that wired up the other
+      // three and missed this one.
+      detail: `Info.plist has ${rule.requirePlistKey} but its value is not a usable purpose string (${JSON.stringify(describePlistValue(raw))})`,
       why: 'iOS shows this string in the permission prompt; an empty or non-string value is not a disclosure, and the shipped bundle ' + (matched.length ? `textually matches ${pattern}` : 'may still reach it by a path this text scan cannot see'),
     });
   } else if (matched.length && !declared) {

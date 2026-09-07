@@ -1678,8 +1678,15 @@ test('a dict-valued key reported by infoPlist.equals does not crash the run', ()
     });
     const manifest = makeManifest({ infoPlist: { equals: { UIApplicationSceneManifest: 'something' } } });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 1, `a dict-valued key must report drift, not crash; got ${code}: ${out}`);
-    assert.match(out, /UIApplicationSceneManifest is "<dict>"/);
+    assert.equal(code, 1, `a dict-valued key must report, not crash; got ${code}: ${out}`);
+    // This assertion used to pin the wording `UIApplicationSceneManifest is
+    // "<dict>"`, from when equals compared against the printed summary. That
+    // comparison turned out to be a false-CLEAN generator (any dict equalled
+    // the literal "<dict>"), so equals now refuses structured values outright
+    // and says why. The test's actual contract -- does not crash, reports
+    // rather than passing -- is unchanged; only the message improved.
+    assert.match(out, /UIApplicationSceneManifest holds <dict>/);
+    assert.match(out, /cannot compare/);
 });
 
 // --- mustContain must match inside ONE file --------------------------------
@@ -1903,4 +1910,155 @@ test('a 1-byte binary plist integer is UNSIGNED: 0xFF is 255, not -1', () => {
     const r2 = run(inDict, makeManifest({ infoPlist: { equals: { Small: 255 } } }));
     assert.equal(r2.code, 0, `a 1-byte 255 must stay 255; got ${r2.code}: ${r2.out}`);
     assert.doesNotMatch(r2.out, /-1/);
+});
+
+// --- infoPlist.equals compares VALUES, never their printed summary ----------
+// The worst defect of the whole review cycle, and it was introduced by the fix
+// that added describePlistValue: the comparison read
+//   String(describePlistValue(plistGet(k))) === String(want)
+// and that helper returns the literal '<dict>' for EVERY dict. So a manifest
+// asserting `equals: { NSAppTransportSecurity: "<dict>" }` passed for any ATS
+// configuration at all.
+//
+// The trap is worse than one wrong verdict. An author who writes the real
+// intended content sees the rule fail forever, and the obvious fix for a rule
+// that will not pass is to paste in the summary the tool itself printed -- at
+// which point it is permanently satisfied by anything of that shape.
+
+test("equals cannot be satisfied by the tool's own summary of a dict", () => {
+    const locked = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', NSAppTransportSecurity: { NSAllowsArbitraryLoads: false } }) });
+    const wideOpen = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', NSAppTransportSecurity: { NSAllowsArbitraryLoads: true, NSExceptionDomains: { 'evil.example': {} } } }) });
+    const manifest = makeManifest({ infoPlist: { equals: { NSAppTransportSecurity: '<dict>' } } });
+    for (const [label, ipa] of [['locked down', locked], ['wide open', wideOpen]]) {
+        const { code, out } = run(ipa, manifest);
+        assert.equal(code, 1, `${label}: a structured value must never satisfy equals; got ${code}: ${out}`);
+        assert.match(out, /cannot compare/);
+        assert.doesNotMatch(out, /VERDICT: CLEAN/);
+    }
+});
+
+test('equals on an array is not satisfied by matching length alone', () => {
+    // Same defect, one type over: describePlistValue rendered '<array of N>',
+    // so two arrays of equal length with entirely different contents compared
+    // equal. Two URL schemes, one legitimate and one hijacked.
+    const legit = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', CFBundleURLTypes: ['myapp-legit'] }) });
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleURLTypes: '<array of 1>' } } });
+    const { code, out } = run(legit, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /cannot compare/);
+});
+
+test('equals still works normally on scalars', () => {
+    // The false-positive guard: refusing structured values must not break the
+    // case equals exists for.
+    const ipa = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.6.0' }) });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.6.0' } } }));
+    assert.equal(code, 0, out);
+});
+
+test('a BigInt plist value does not crash capabilityCoupling', () => {
+    // The FOURTH site where a raw plist value reached JSON.stringify, which
+    // throws on a BigInt -- the value the signed 8-byte integer path returns
+    // for anything outside the safe range. The commit that added
+    // describePlistValue to guard exactly this wired up three sites and missed
+    // this one. Uncaught, it exited 1 with a stack trace: the same code an
+    // honest violation uses, with the real finding never printed.
+    const ipa = makeIpa({
+        rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', NSPhotoLibraryAddUsageDescription: 9223372036854775000 }),
+        web: { 'js/s.js': 'if (navigator.share) { shareCard(); }' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription', why: 'the TCC crash' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /not a usable purpose string/, 'the real finding must print');
+    assert.doesNotMatch(out, /Do not know how to serialize a BigInt|TypeError/);
+});
+
+test('a binary plist date marker must be exactly 0x33', () => {
+    // The low nibble of a date marker is part of the type, not a length.
+    // Accepting any 0x3n and then reading 8 bytes anyway would parse 0x30 as a
+    // date and build a verdict on bytes the format never called one.
+    const raw = execFileSync('python3', ['-c', [
+        'import struct,sys',
+        'hdr=b"bplist00"',
+        'o0=bytes([0xd1,0x01,0x02]); o1=bytes([0x51])+b"D"; o2=bytes([0x30])+struct.pack(">d",0.0)',
+        'body=o0+o1+o2',
+        'offs=bytes([len(hdr),len(hdr)+len(o0),len(hdr)+len(o0)+len(o1)])',
+        'tr=bytes(6)+bytes([1,1])+struct.pack(">QQQ",3,0,len(hdr)+len(body))',
+        'sys.stdout.buffer.write(hdr+body+offs+tr)',
+    ].join('\n')], { maxBuffer: 1 << 20 });
+    const { code, out } = run(makeIpa({ rawPlist: raw }), makeManifest({ infoPlist: { equals: { D: 'x' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /not the 0x33 a date must be/);
+});
+
+test("the mustContain cross-file note does not fire on the tool's own path text", () => {
+    // The note's haystack used to glue files with a `\n/*<path>*/\n` separator
+    // carrying each file's own relative path, so a pattern matching a FILENAME
+    // matched the tool's own bookkeeping. With one file there is no boundary to
+    // cross and the matched bytes were never in the app at all, yet the note
+    // claimed a cross-file match.
+    const ipa = makeIpa({
+        webRoot: 'public',
+        plist: BASE_PLIST,
+        web: { 'js/share.js': "console.log('nothing to see here at all');" },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public', mustContain: [{ pattern: 'share\\.js', why: 'the share module must ship' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.doesNotMatch(out, /ACROSS file boundaries/, 'a single-file bundle has no boundary to cross');
+});
+
+// --- required means PRESENT, not TRUTHY ------------------------------------
+// Found by auditing every plist read after two consecutive review rounds each
+// caught a regression of mine in the same class, rather than by waiting for a
+// third. The check read `typeof v === 'string' ? v.trim() : v`, so every falsy
+// value counted as absent -- and plists are full of legitimately falsy values.
+
+test('a required key whose value is false is present, not MISSING', () => {
+    // ITSAppUsesNonExemptEncryption: false is one of the most common keys in
+    // the fleet, added precisely so App Store Connect stops asking on every
+    // build. Writing the natural required rule for it would have blocked every
+    // build with a fabricated finding.
+    const ipa = makeIpa({
+        rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', ITSAppUsesNonExemptEncryption: false, SomeCount: 0 }),
+    });
+    const manifest = makeManifest({
+        infoPlist: { required: [
+            { key: 'ITSAppUsesNonExemptEncryption', why: 'declared so ASC does not ask every build' },
+            { key: 'SomeCount', why: 'present with value 0' },
+        ] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, `falsy is not absent; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /MISSING/);
+});
+
+test('a required key that is genuinely absent is still MISSING', () => {
+    // The false-positive guard for the fix above: presence must still be
+    // checked, not assumed.
+    const ipa = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app' }) });
+    const manifest = makeManifest({ infoPlist: { required: [{ key: 'NSMicrophoneUsageDescription', why: 'the mic disclosure' }] } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /NSMicrophoneUsageDescription MISSING/);
+});
+
+test('a required key present with a blank string says so, rather than MISSING', () => {
+    // Blank-when-present and absent are different defects with different fixes.
+    // One message for both sends half the readers to the wrong place, which is
+    // the standard's own "a wrong diagnosis is more expensive than a vague one".
+    const ipa = makeIpa({
+        rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', NSMicrophoneUsageDescription: '   ' }),
+    });
+    const manifest = makeManifest({ infoPlist: { required: [{ key: 'NSMicrophoneUsageDescription', why: 'the mic disclosure' }] } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /present but its string value is blank/);
+    assert.doesNotMatch(out, /MISSING/);
 });
