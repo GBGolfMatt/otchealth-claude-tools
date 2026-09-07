@@ -9,25 +9,14 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { getTextFromS3, listBlobsFromS3 } from "./s3-blob.mjs";
+import { APPROVED_ALIAS_KEYS, APPROVED_ENTITY_KEYS } from "./current-cloud-schema.mjs";
 
 const ACCOUNT = "otchealthcommons";
 const CONTAINER = "company-journal";
 const PREFIX = "_MEMORY/_exec/";
 
-export const APPROVED_ENTITIES = Object.freeze([
-  "otchealth_primary_cloud",
-  "otchealth_gateway_runtime",
-  "otchealth_brain_backend",
-  "otchealth_agent_state_backend",
-]);
-
-export const APPROVED_ALIASES = Object.freeze([
-  "what_cloud_platform_is_the_company_brain_running_on_now_and_is_azure_still_active",
-  "what_is_the_current_search_backend_and_live_index_architecture_for_brain_search",
-  "what_is_otchealths_current_primary_cloud",
-  "where_is_the_otchealth_gateway_running_now",
-  "what_is_the_current_otchealth_agent_state_backend",
-]);
+export const APPROVED_ENTITIES = APPROVED_ENTITY_KEYS;
+export const APPROVED_ALIASES = APPROVED_ALIAS_KEYS;
 
 const approvedType = (row) =>
   row?.type === "entity" && APPROVED_ENTITIES.includes(row.ekey)
@@ -53,6 +42,7 @@ export function summarizeApprovedRows(rows, metadata = {}) {
 
   const forkedKeys = [];
   const unexpectedOwners = [];
+  const invalidAliasTargets = [];
   const entities = [];
   const aliases = [];
 
@@ -76,8 +66,16 @@ export function summarizeApprovedRows(rows, metadata = {}) {
       owner: current.agent || current.by || null,
       source_row_id: current.id || null,
     };
-    if (current.type === "alias") item.target_key = current.evalue;
-    (current.type === "entity" ? entities : aliases).push(item);
+    if (current.type === "alias") {
+      if (!APPROVED_ENTITIES.includes(current.evalue)) {
+        invalidAliasTargets.push(item);
+      } else {
+        item.target_key = current.evalue;
+        aliases.push(item);
+      }
+    } else {
+      entities.push(item);
+    }
   }
 
   entities.sort((a, b) => a.key.localeCompare(b.key));
@@ -91,7 +89,7 @@ export function summarizeApprovedRows(rows, metadata = {}) {
   const structurallyValid = scannedFiles > 0 && parsedRows > 0 && invalidRows === 0;
 
   return {
-    ok: structurallyValid && unexpectedOwners.length === 0 && forkedKeys.length === 0,
+    ok: structurallyValid && unexpectedOwners.length === 0 && forkedKeys.length === 0 && invalidAliasTargets.length === 0,
     owner: "cto",
     scanned_shared_files: scannedFiles,
     parsed_shared_rows: parsedRows,
@@ -104,6 +102,7 @@ export function summarizeApprovedRows(rows, metadata = {}) {
     missing_approved_aliases: APPROVED_ALIASES.filter((key) => !aliasKeys.has(key)),
     forked_keys: [...new Set(forkedKeys)].sort(),
     unexpected_owners: unexpectedOwners,
+    invalid_alias_targets: invalidAliasTargets,
     entities,
     aliases,
   };

@@ -4,9 +4,9 @@ These commands are a reviewed data plan. Do not run them from CI or as part of i
 Re-read live AWS metadata immediately before execution. The values below were verified on 2026-09-07
 from ECS, OpenSearch, RDS, and the gateway health evidence recorded by the CTO seat.
 
-Before any write, run the bounded inventory wrapper. It invokes the supported `entity list`
-CLI with stdout captured in memory and emits only the owner, counts, the four approved canonical keys,
-and their current row IDs. It never logs entity values or unrelated alias names.
+Before any write, run the bounded inventory wrapper. It reads the authoritative S3 shared feed with
+the same storage functions as the memory CLI and emits only counts, the approved keys, owners, row IDs,
+and structural safety findings. It never logs entity values or unrelated alias names.
 
 ```text
 node skills/kb-memory/entity-inventory.mjs
