@@ -44,6 +44,9 @@ import { translate } from "./pg-sql-translate.mjs";
 // CONTAINERS set -- a caller-supplied container string must never reach SQL un-validated.
 const CONTAINERS = new Set(["decisions_pending", "signals"]);
 const ID_RE = /^[A-Za-z0-9_.\-]{1,255}$/;
+// Signal IDs already use detector::subject for stable cooldown/history identity. They are bound
+// SQL values, not identifiers. Keep the existing stricter charset for partition keys and decisions.
+const SIGNAL_ID_RE = /^[A-Za-z0-9_.:\-]{1,255}$/;
 
 /** Container -> physical table, prefixed exactly like the gateway's postgres.ts tableFor() so the two
  *  new tables sit in the SAME agentstate_* naming convention as the gateway's own tables in the same
@@ -53,10 +56,14 @@ export function tableFor(coll) {
   return `agentstate_${coll}`;
 }
 
-function assertId(value, label = "id") {
-  if (typeof value !== "string" || !ID_RE.test(value) || /^\.+$/.test(value)) {
+function assertId(value, label = "id", pattern = ID_RE) {
+  if (typeof value !== "string" || !pattern.test(value) || /^\.+$/.test(value)) {
     throw new Error(`invalid ${label} (must match the agent-state id charset)`);
   }
+}
+
+function assertDocId(coll, id) {
+  assertId(id, "id", coll === "signals" ? SIGNAL_ID_RE : ID_RE);
 }
 
 // ---- connection config -------------------------------------------------------------------------
@@ -131,7 +138,7 @@ export async function createDoc(coll, pkValue, doc) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
   const id = String(doc.id ?? "");
-  assertId(id);
+  assertDocId(coll, id);
   const etag = newEtag();
   const conn = await getConn();
   try {
@@ -151,7 +158,7 @@ export async function createDoc(coll, pkValue, doc) {
 export async function readDoc(coll, pkValue, id) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
-  assertId(id);
+  assertDocId(coll, id);
   const conn = await getConn();
   const r = await conn.query(`SELECT doc, etag FROM ${table} WHERE pk = $1 AND id = $2`, [pkValue, id]);
   if (!r.rows.length) return null;
@@ -172,7 +179,7 @@ export async function readDoc(coll, pkValue, id) {
 export async function replaceDoc(coll, pkValue, id, doc, ifMatch) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
-  assertId(id);
+  assertDocId(coll, id);
   const etag = newEtag();
   const conn = await getConn();
   const r = await conn.query(
@@ -199,7 +206,7 @@ export async function upsertDoc(coll, pkValue, doc) {
   const table = tableFor(coll);
   assertId(pkValue, "partition key");
   const id = String(doc.id ?? "");
-  assertId(id);
+  assertDocId(coll, id);
   const etag = newEtag();
   const conn = await getConn();
   await conn.query(
@@ -231,4 +238,3 @@ export async function queryDocs(coll, query, parameters = [], opts = {}) {
 export function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`;
 }
-
