@@ -24,7 +24,7 @@
 //     group; there is nothing left to query there). Left in place rather than stripped out --  it
 //     still documents which jobs were considered safe/unsafe to auto-restart, which is exactly the
 //     judgment call an eventual ECS restart executor will need to re-make.
-//   - `check` reports LIVE/LATE/DEAD/NO-DATA from the self-beat alone. A job that cannot even start
+//   - `check` reports LIVE/LATE/DEAD/UNKNOWN/NO-DATA from the self-beat alone. A job that cannot even start
 //     now shows the SAME "DEAD (never)" as a job that started and then silently stopped beating --
 //     that distinction (the whole point of the old ARM-liveness half) is a real regression until an
 //     ECS-based equivalent exists; it is called out here rather than left to be discovered.
@@ -80,9 +80,38 @@ async function listBeats() {
 // Note this filters the REGISTRY only: `check` also watches every job a beat file names, so a
 // retired job that somehow still beats stays visible instead of being silently ignored.
 export function isWatchedJobKey(key) { return !String(key).startsWith("_"); }
+// Allow at most one minute of producer/observer clock skew, clamped to age zero. A timestamp
+// farther ahead cannot demonstrate health. Read the observation clock after each beat fetch.
+export const HEARTBEAT_CLOCK_SKEW_MS = 60_000;
+export function heartbeatAgeMinutes(lastOk, now) {
+  if (typeof lastOk !== "string" || !Number.isFinite(now)) return null;
+  const parsed = Date.parse(lastOk);
+  if (!Number.isFinite(parsed) || parsed - now > HEARTBEAT_CLOCK_SKEW_MS) return null;
+  return Math.max(0, Math.round((now - parsed) / 60000));
+}
+export function classifyHeartbeat({ registered, intervalMin: rawIntervalMin, lastOk, now }) {
+  const intervalMin = typeof rawIntervalMin === "number" && Number.isFinite(rawIntervalMin) && rawIntervalMin > 0
+    ? rawIntervalMin
+    : null;
+  const hasLastOk = lastOk !== undefined && lastOk !== null;
+  const ageMin = heartbeatAgeMinutes(lastOk, now);
+  let status;
+  if (registered && intervalMin === null) status = "UNKNOWN";
+  else if (!registered && !hasLastOk) status = "NO-DATA";
+  else if (ageMin === null) status = "DEAD";
+  else if (!registered) status = "UNKNOWN";
+  else if (ageMin > intervalMin * 3) status = "DEAD";
+  else if (ageMin > intervalMin) status = "LATE";
+  else status = "LIVE";
+  return { status, ageMin, intervalMin };
+}
+
 function loadRegistry() {
   try {
-    const raw = JSON.parse(readFileSync(join(HERE, "heartbeat-registry.json"), "utf8"));
+    const registryPath = process.env.NODE_ENV === "test" && process.env.HEARTBEAT_TEST_REGISTRY_FILE
+      ? process.env.HEARTBEAT_TEST_REGISTRY_FILE
+      : join(HERE, "heartbeat-registry.json");
+    const raw = JSON.parse(readFileSync(registryPath, "utf8"));
     return Object.fromEntries(Object.entries(raw).filter(([k]) => isWatchedJobKey(k)));
   } catch { return {}; }
 }
@@ -158,23 +187,18 @@ if (isMain)
     const files = await listBeats();
     const seen = new Set(files.map((f) => f.replace(/\.json$/, "")));
     const jobs = [...new Set([...Object.keys(reg), ...seen])].sort();
-    const now = Date.now();
     const rows = [];
     for (const job of jobs) {
       const hb = (await getJson(`${job}.json`)) || {};
-      const intervalMin = (reg[job] && reg[job].interval_min) || null;
-      const lastOk = hb.last_ok ? Date.parse(hb.last_ok) : null;
-      const ageMin = lastOk ? Math.round((now - lastOk) / 60000) : null;
-      // No ARM/control-plane signal any more (see header note): status is derived from the self-beat
-      // alone. A job that never even started now reads identically to one that started and stopped
-      // beating -- both are "DEAD (never)" / "NO-DATA" -- where the pre-port ARM path could once tell
-      // those apart. Flagged, not silently narrowed.
-      let status;
-      if (!intervalMin && !lastOk) status = "NO-DATA";
-      else if (!lastOk) status = "DEAD";
-      else if (intervalMin && ageMin > intervalMin * 3) status = "DEAD"; // 3x = alert
-      else if (intervalMin && ageMin > intervalMin) status = "LATE";     // 1x = missing
-      else status = "LIVE";
+      const registered = Object.prototype.hasOwnProperty.call(reg, job);
+      const { status, ageMin, intervalMin } = classifyHeartbeat({
+        registered, intervalMin: registered ? reg[job]?.interval_min : undefined,
+        lastOk: hb.last_ok, now: Date.now(),
+      });
+      // No ARM/control-plane signal any more (see header note). A registered job with a valid cadence
+      // is LIVE/LATE/DEAD from its self-beat. A valid observed beat without a usable registered cadence
+      // is UNKNOWN and actionable because no finite lateness threshold can be proved. An unregistered
+      // observation with no completion remains NO-DATA; an invalid present completion is DEAD.
       const row = { job, status, ageMin, intervalMin, owner: (reg[job] || {}).owner || "", last_event: hb.last_event || "", consecutive_fail: hb.consecutive_fail || 0 };
 
       // Auto-restart eligibility is unchanged in SHAPE (still gated on the registry's own
@@ -187,7 +211,7 @@ if (isMain)
       rows.push(row);
     }
     if (argv.includes("--json")) { console.log(JSON.stringify(rows, null, 2)); return; }
-    const bad = rows.filter((r) => r.status === "DEAD" || r.status === "LATE" || r.consecutive_fail > 0);
+    const bad = rows.filter((r) => r.status === "DEAD" || r.status === "LATE" || r.status === "UNKNOWN" || r.consecutive_fail > 0);
     console.log(`# FLEET HEARTBEAT — ${rows.length} job(s); ${bad.length} needing attention`);
     for (const r of rows) {
       const age = r.ageMin == null ? "never" : r.ageMin < 60 ? `${r.ageMin}m` : `${Math.round(r.ageMin / 60)}h`;
