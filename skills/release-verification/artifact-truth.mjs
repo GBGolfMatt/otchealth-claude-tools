@@ -14,8 +14,13 @@
 //   this file's whole point is that the two are different. There is also
 //   nothing here for a symbol-based scan to find: the app links no PhotoKit
 //   at all, because the write happens inside UIActivityViewController on the
-//   user's behalf when they choose Save Image. Only a real device shows it,
-//   as a runtime kill. (An earlier version of this comment asserted what
+//   user's behalf when they choose Save Image. Only a real device shows the
+//   CONSEQUENCE -- the runtime kill under TCC. The DEFECT itself is visible in
+//   the artifact without any device, which is the entire premise of this file:
+//   a shipped bundle that matches the share-sheet pattern, with no
+//   NSPhotoLibraryAddUsageDescription in the shipped plist. An earlier draft
+//   said "only a real device shows it", which contradicted the tool it sits at
+//   the top of. (An earlier version of this comment asserted what
 //   Apple's own scanner does internally. That was an unsourced claim about
 //   someone else's tooling, removed from SKILL.md and then left here -- a
 //   correction that reached the doc and not the code it describes.)
