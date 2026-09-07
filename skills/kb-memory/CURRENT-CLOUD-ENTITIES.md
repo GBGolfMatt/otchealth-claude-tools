@@ -45,3 +45,16 @@ refuses malformed or forked shared-feed inventory, skips identical rows, and sta
 Entity writes supersede only an earlier row with the same canonical key. Alias writes are owner-only;
 `--agent <writer> --on <other-lane>` is rejected before storage access, and `clo-personal --share`
 continues to be held in the private lane by the existing shared-feed gate.
+
+## One-off execution limits
+
+Run the seed in one isolated task while no other CTO memory writer is active. The current shared-feed
+publisher updates the per-agent object with a read followed by an unconditional write, so concurrent
+CTO writers can race. The wrapper forces `BLOB_BACKEND=s3`; legacy Azure may be consulted only as a
+best-effort history read and is never a write target.
+
+Each child CLI call has a 45-second limit. A timeout can occur after the private append but before
+shared publication or process exit. The wrapper suppresses the child's stdout and stderr, then performs
+an independent shared-feed inventory. It continues only when that exact approved row is confirmed;
+otherwise it stops with a metadata-only failure. A final inventory must confirm all four entities and
+five aliases. Live Brain recall remains a separate post-deploy acceptance check.

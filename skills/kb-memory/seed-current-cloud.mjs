@@ -47,6 +47,8 @@ function invokeMemory(operation) {
     encoding: "utf8",
     timeout: 45000,
     maxBuffer: 8 * 1024 * 1024,
+    // Force the active S3 backend even if the one-off task inherited a stale legacy override.
+    env: { ...process.env, BLOB_BACKEND: "s3" },
   });
 }
 
@@ -70,10 +72,27 @@ export async function runSeed(apply = false) {
   for (const operation of plan.operations) {
     const result = invokeMemory(operation);
     if (result.error || result.status !== 0) {
+      // A timeout can happen after the private append but before the child reports completion.
+      // Accept it only if an independent shared-feed read proves this exact operation persisted.
+      let sharedConfirmed = false;
+      try {
+        const observed = await loadApprovedSharedState();
+        const retryPlan = planSeed(observed.summary, observed.rows);
+        sharedConfirmed = retryPlan.ok && !retryPlan.operations.some(
+          (item) => item.type === operation.type && item.key === operation.key,
+        );
+      } catch {
+        sharedConfirmed = false;
+      }
+      if (sharedConfirmed) {
+        completed.push({ type: operation.type, key: operation.key, shared_confirmed: true });
+        continue;
+      }
       return {
         ok: false,
         applied: completed.length > 0,
         error_category: result.error?.code === "ETIMEDOUT" ? "timeout" : "memory_cli_failed",
+        shared_confirmed: false,
         completed,
         failed: { type: operation.type, key: operation.key },
       };
