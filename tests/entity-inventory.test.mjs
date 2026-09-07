@@ -1,32 +1,40 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVED_KEYS, summarizeEntityList } from "../skills/kb-memory/entity-inventory.mjs";
+import { APPROVED_ENTITIES, summarizeApprovedRows } from "../skills/kb-memory/entity-inventory.mjs";
 
-test("inventory emits only approved names, counts, owner, and row ids", () => {
-  const raw = [
-    "# CURRENT VALUES (cto ledger) - 6 entities",
-    "otchealth_primary_cloud = SECRET-VALUE-MUST-NOT-LEAK   [2026-09-07 cto-row-1]",
-    "unrelated_private_key = ANOTHER-SECRET   [2026-09-07 cto-row-2]",
-    "otchealth_brain_backend = Amazon OpenSearch Service   [2026-09-07 cto-row-3]",
-    "## aliases",
-    "what_is_current -> otchealth_brain_backend",
-    "private_alias -> unrelated_private_key",
-  ].join("\n");
+const row = (type, ekey, evalue, id, extra = {}) => ({
+  type, ekey, evalue, id, ts: `2026-09-07T00:00:0${id.length}Z`, agent: "cto", ...extra,
+});
 
-  const summary = summarizeEntityList(raw);
+test("shared inventory emits only allowlisted metadata and never values", () => {
+  const rows = [
+    row("entity", "otchealth_primary_cloud", "SECRET-VALUE-MUST-NOT-LEAK", "e1"),
+    row("entity", "unrelated_private_key", "ANOTHER-SECRET", "e2"),
+    row("alias", "what_is_otchealths_current_primary_cloud", "otchealth_primary_cloud", "a1"),
+  ];
+  const summary = summarizeApprovedRows(rows, { scanned_files: 3, parsed_rows: 99, invalid_rows: 0 });
+  assert.equal(summary.ok, true);
   assert.equal(summary.owner, "cto");
-  assert.equal(summary.total_entity_count, 6);
-  assert.equal(summary.total_alias_count, 2);
-  assert.equal(summary.present_approved_count, 2);
-  assert.deepEqual(summary.entities, [
-    { key: "otchealth_brain_backend", source_row_id: "cto-row-3" },
-    { key: "otchealth_primary_cloud", source_row_id: "cto-row-1" },
-  ]);
-  assert.deepEqual(summary.missing_approved_keys, APPROVED_KEYS.filter((key) =>
-    !new Set(summary.entities.map((row) => row.key)).has(key),
-  ));
+  assert.equal(summary.scanned_shared_files, 3);
+  assert.equal(summary.parsed_shared_rows, 99);
+  assert.deepEqual(summary.entities, [{ key: "otchealth_primary_cloud", owner: "cto", source_row_id: "e1" }]);
+  assert.deepEqual(summary.missing_approved_entities, APPROVED_ENTITIES.filter((key) => key !== "otchealth_primary_cloud"));
   const serialized = JSON.stringify(summary);
   assert.equal(serialized.includes("SECRET-VALUE"), false);
   assert.equal(serialized.includes("unrelated_private_key"), false);
-  assert.equal(serialized.includes("private_alias"), false);
+});
+
+test("shared inventory fails closed on malformed or empty source output", () => {
+  assert.equal(summarizeApprovedRows([], { scanned_files: 0, parsed_rows: 0, invalid_rows: 0 }).ok, false);
+  assert.equal(summarizeApprovedRows([], { scanned_files: 1, parsed_rows: 2, invalid_rows: 1 }).ok, false);
+});
+
+test("shared inventory rejects an unexpected owner and an unchained same-key correction", () => {
+  const first = row("entity", "otchealth_brain_backend", "one", "one");
+  const fork = row("entity", "otchealth_brain_backend", "two", "two", { ts: "2026-09-08", supersedes: undefined });
+  const other = row("alias", "what_is_otchealths_current_primary_cloud", "otchealth_primary_cloud", "x", { agent: "developer" });
+  const summary = summarizeApprovedRows([first, fork, other], { scanned_files: 2, parsed_rows: 3, invalid_rows: 0 });
+  assert.equal(summary.ok, false);
+  assert.deepEqual(summary.forked_keys, ["otchealth_brain_backend"]);
+  assert.equal(summary.unexpected_owners[0].owner, "developer");
 });

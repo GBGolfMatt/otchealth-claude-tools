@@ -33,6 +33,7 @@ node skills/kb-memory/mem.mjs entity set <key> "<value>"   --agent cfo [--source
 node skills/kb-memory/mem.mjs entity get <key>             --agent cfo            # the CURRENT value + provenance (resolves aliases)
 node skills/kb-memory/mem.mjs entity list                  --agent cfo            # all current-values + aliases
 node skills/kb-memory/entity-inventory.mjs                                  # CTO-only metadata inventory for the four approved cloud keys
+node skills/kb-memory/seed-current-cloud.mjs [--apply]                    # guarded, idempotent seed plan; dry-run unless --apply
 node skills/kb-memory/mem.mjs entity alias "<phrasing>" <canonical-key> --agent cfo [--source "..."] [--share]  # point many phrasings at one key
 node skills/kb-memory/mem.mjs entity link <from-key> <relation> <to-key> --agent cfo [--source "..."] [--share]  # append a relationship edge (thin, no graph DB)
 node skills/kb-memory/mem.mjs entity graph <key>            --agent cfo [--hops 1|2]  # 1-2 hop neighborhood walk: "what depends on X" (both directions)
