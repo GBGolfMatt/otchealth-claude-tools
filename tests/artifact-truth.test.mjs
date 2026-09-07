@@ -273,13 +273,18 @@ test('both patterns must hit the SAME file, not two unrelated modules', () => {
 
 // --- the exit-code contract -------------------------------------------------
 
-test('a malformed manifest exits 2, not 1', () => {
+test('a malformed manifest exits 3 (verifier misconfigured), not 2 and not 1', () => {
+    // It used to exit 2 and print ARTIFACT UNREADABLE, which is a statement
+    // about the BUILD -- for a typo in a config file, with an IPA that was
+    // perfectly fine. A wrong diagnosis is worse than a vague one because it is
+    // actionable: someone goes and debugs the artifact.
     const ipa = makeIpa({ plist: BASE_PLIST });
     const bad = path.join(tmp('manifest'), 'm.json');
     fs.writeFileSync(bad, '{ this is not json');
     const { code, out } = run(ipa, bad);
-    assert.equal(code, 2, out);
-    assert.match(out, /ARTIFACT UNREADABLE/);
+    assert.equal(code, 3, out);
+    assert.match(out, /VERIFIER MISCONFIGURED/);
+    assert.doesNotMatch(out, /ARTIFACT UNREADABLE/, 'a config error must not be reported as an unreadable build');
 });
 
 test('a file that is not an IPA exits 2', () => {
@@ -325,9 +330,10 @@ test('a wrong webBundle.root exits 2 instead of silently passing every rule', ()
     assert.doesNotMatch(out, /VERDICT: CLEAN/);
 });
 
-test('missing arguments exit 2', () => {
+test('missing arguments exit 3, not 2 -- a caller mistake is not an unreadable build', () => {
     const r = spawnSync('node', [TOOL], { encoding: 'utf8' });
-    assert.equal(r.status, 2);
+    assert.equal(r.status, 3);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /ARTIFACT UNREADABLE/);
 });
 
 // --- plist and bundle rules -------------------------------------------------
@@ -458,7 +464,7 @@ test('capability coupling reads the real binary plist: absent key, unreachable A
 
 // --- manifest validation is an INSPECTION step, not a violation -------------
 
-test('an invalid regex in the manifest exits 2, not 1', () => {
+test('an invalid regex in the manifest exits 3, not 1', () => {
     // A manifest can be valid JSON and still be a broken rule set. Compiling
     // mid-run turned that into exit 1, which claims the artifact is at fault.
     const ipa = makeIpa({ plist: BASE_PLIST });
@@ -466,23 +472,24 @@ test('an invalid regex in the manifest exits 2, not 1', () => {
         capabilityCoupling: [{ ifBundleMatches: '[', requirePlistKey: 'NSMicrophoneUsageDescription' }],
     });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 2, out);
+    assert.equal(code, 3, out);
     assert.match(out, /not a valid regular expression/);
+    assert.match(out, /VERIFIER MISCONFIGURED/);
 });
 
-test('a rule missing requirePlistKey exits 2 rather than matching nothing', () => {
+test('a rule missing requirePlistKey exits 3 rather than matching nothing', () => {
     const ipa = makeIpa({ plist: BASE_PLIST });
     const manifest = makeManifest({ capabilityCoupling: [{ ifBundleMatches: 'getUserMedia' }] });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 2, out);
+    assert.equal(code, 3, out);
     assert.match(out, /requirePlistKey/);
 });
 
-test('a webBundle pattern that is not a string exits 2', () => {
+test('a webBundle pattern that is not a string exits 3', () => {
     const ipa = makeIpa({ plist: BASE_PLIST, web: { 'js/a.js': 'x' } });
     const manifest = makeManifest({ webBundle: { root: 'public', mustNotContain: [{ why: 'no pattern given' }] } });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 2, out);
+    assert.equal(code, 3, out);
 });
 
 // --- renderedVersion markup tolerance ---------------------------------------
@@ -564,7 +571,7 @@ test('a mustContain alternation is satisfied by either branch', () => {
 
 // --- infoPlist rule shapes are validated too --------------------------------
 
-test('an infoPlist rule with no key exits 2 rather than matching undefined', () => {
+test('an infoPlist rule with no key exits 3 rather than matching undefined', () => {
     // `plist[undefined]` does not throw; it quietly reports "undefined MISSING"
     // or passes a forbidden check that never looked at anything. Nonsense
     // matching is worse than a crash because it is reported as a result.
@@ -574,7 +581,7 @@ test('an infoPlist rule with no key exits 2 rather than matching undefined', () 
         { infoPlist: { forbidden: [{ why: 'no key given' }] } },
     ]) {
         const { code, out } = run(ipa, makeManifest(expect_));
-        assert.equal(code, 2, out);
+        assert.equal(code, 3, out);
         assert.match(out, /key must be a non-empty string/);
     }
 });

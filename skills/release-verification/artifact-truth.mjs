@@ -47,8 +47,13 @@
 // Usage:
 //   node artifact-truth.mjs --ipa <path/to/App.ipa> --manifest <app.release-truth.json> [--json]
 //
-// Exit 0 = every declared expectation holds. Exit 1 = at least one violation.
-// Exit 2 = could not inspect the artifact at all (never reported as a pass).
+// EXIT CODES. 0 = every declared expectation holds. 1 = at least one violation.
+// 2 = could not inspect the ARTIFACT (never reported as a pass). 3 = the
+// VERIFIER ITSELF is unusable -- missing arguments, unreadable or invalid
+// manifest, a rule that will not compile. 2 and 3 both block; they are separate
+// because 2 is a statement about the build and 3 is a statement about our own
+// configuration, and printing the former when the latter is true sends someone
+// to debug an artifact that is fine.
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -65,7 +70,7 @@ const ipaPath = arg('ipa');
 const manifestPath = arg('manifest');
 if (!ipaPath || !manifestPath) {
   console.error('usage: artifact-truth.mjs --ipa <App.ipa> --manifest <release-truth.json> [--json]');
-  process.exit(2);
+  process.exit(3);   // caller error, not an unreadable artifact -- see EXIT CODES above
 }
 
 // ---------------------------------------------------------------------------
@@ -447,13 +452,34 @@ function inspect(what, fn) {
   }
 }
 
+// The comment above says these are different facts and a release gate has to
+// keep them apart -- and then an earlier version of this file ran BOTH through
+// inspect(), so a typo in the manifest printed "ARTIFACT UNREADABLE" about an
+// IPA that was perfectly fine. That is the misleading-evidence failure this
+// whole tool exists to prevent, committed by the tool itself: it sends someone
+// to examine an artifact when the broken thing is the config on disk.
+//
+// Exit 3 is safe to add: every consumer invokes this under `set -euo pipefail`
+// with a bare call, so any non-zero still blocks. What changes is that a
+// reader, and a script, can now tell "I could not read the build" from
+// "you handed me a manifest I cannot use".
+function configError(what, fn) {
+  try {
+    return fn();
+  } catch (e) {
+    console.error(`VERIFIER MISCONFIGURED: ${what}: ${e && e.message}`);
+    console.error('Failing with exit 3. The artifact was never opened, so this says nothing about the build.');
+    process.exit(3);
+  }
+}
+
 // An id is a literal, so escape it before it becomes part of a pattern.
 function escapeForRegExp(literal) {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 const RENDERED_VERSION_KEY = Symbol('renderedVersion');
 
-const manifest = inspect(`reading manifest ${manifestPath}`, () => JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
+const manifest = configError(`reading manifest ${manifestPath}`, () => JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
 const expect = manifest.expect || {};
 
 // Compile every pattern up front, inside inspect(). A manifest is valid JSON
@@ -463,7 +489,7 @@ const expect = manifest.expect || {};
 // violation of the artifact. Those are opposite conclusions. Compiling here
 // also means a rule missing its required fields fails closed instead of
 // matching nothing and quietly passing.
-const compiled = inspect(`validating rules in ${manifestPath}`, () => {
+const compiled = configError(`validating rules in ${manifestPath}`, () => {
   const patterns = new Map();
   const compile = (where, source) => {
     if (typeof source !== 'string' || source === '') throw new Error(`${where}: pattern must be a non-empty string, got ${JSON.stringify(source)}`);

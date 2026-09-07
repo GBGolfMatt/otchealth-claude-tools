@@ -357,6 +357,14 @@ only happens when someone thinks to run it is not a gate.
    expired, the auto-critic that posted "fail-safe approve" and reported
    SUCCESS — all reported healthy while doing nothing. Distinguish *transport
    failure* from *clean result* at every layer.
+
+   And distinguish the failures from EACH OTHER, which is the harder half.
+   `artifact-truth.mjs` separates exit 2 (the artifact could not be read) from
+   exit 3 (the verifier's own manifest is unusable) because an earlier version
+   ran both through one handler and printed "ARTIFACT UNREADABLE" for a typo in
+   a config file — sending a reader to debug a build that was fine. A wrong
+   diagnosis is more expensive than a vague one: it is actionable, so someone
+   acts on it.
 3. **Assert the outcome, not the mechanism.** The `{{APP_VERSION}}` rule that
    fired on comments documenting the substitution is the cautionary example.
 4. **Negative evidence is not positive evidence.** "It did not crash" is not

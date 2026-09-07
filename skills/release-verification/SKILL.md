@@ -1,6 +1,6 @@
 ---
 name: release-verification
-description: Verify what a build actually SHIPPED rather than what its repo says, before a human reviewer ever sees it. Run "node artifact-truth.mjs --ipa <App.ipa> --manifest schema/<app>.release-truth.json" against the downloaded artifact to check Info.plist expectations, shipped-web-bundle content, and capability coupling (if the shipped bundle's text matches a privacy API's pattern, its usage-description key must be declared, or iOS terminates the process under TCC). Exit 0 clean, 1 violations, 2 artifact unreadable. Use before every TestFlight hand-off, and read app-kit/RELEASE-VERIFICATION-STANDARD.md for the surrounding five-stage process and the A/B/C packet-item classification that decides what a human is allowed to be asked.
+description: Verify what a build actually SHIPPED rather than what its repo says, before a human reviewer ever sees it. In CI, run 'node artifact-truth.mjs --ipa $IPA_PATH --manifest schema/<app>.release-truth.json' against the export/upload candidate BEFORE the upload step, which is where the gate belongs; out of CI, run it against the artifact downloaded from a completed run. Either way it checks Info.plist expectations, shipped-web-bundle content, and capability coupling (if the shipped bundle's text matches a privacy API's pattern, its usage-description key must be declared, or iOS terminates the process under TCC). Exit 0 clean, 1 violations, 2 artifact unreadable, 3 verifier misconfigured. Use before every TestFlight hand-off, and read app-kit/RELEASE-VERIFICATION-STANDARD.md for the surrounding five-stage process and the A/B/C packet-item classification that decides what a human is allowed to be asked.
 ---
 
 # release-verification
@@ -83,6 +83,7 @@ so it needs no `plistlib`, no macOS, and no Xcode.
 | `0`  | Every declared expectation held. |
 | `1`  | At least one violation. The report names the rule, what it saw, and why it matters. |
 | `2`  | **Could not inspect the artifact at all.** Deliberately distinct from 0. A verifier that cannot read the thing has proven nothing, and must never print a pass. |
+| `3`  | **The verifier itself is unusable** — missing arguments, an unreadable or invalid manifest, a rule that will not compile. Separate from 2 because 2 is a claim about the BUILD and 3 is a claim about our own configuration. Both block. Printing 2 when 3 is true sends someone to debug an artifact that is fine. |
 
 That third exit code is the whole reason to trust the other two. The failure
 mode this tool is built against is *a gate that reports success while doing
