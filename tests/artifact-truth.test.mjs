@@ -1721,3 +1721,144 @@ test('mustContain still passes on a real single-file match, and names the file',
     assert.equal(code, 0, out);
     assert.match(out, /bundle contains cioConsentGranted \(in js[/\\]native\.js\)/);
 });
+
+// --- the null-prototype fix had a blast radius the fix itself missed --------
+// Making parsed dicts Object.create(null) closed the __proto__ hole for every
+// GUARDED read. Three reads were not guarded -- the renderedVersion comparison
+// and the two header fields -- and they interpolated the value into a template
+// string. A plain object renders as "[object Object]" there; a null-prototype
+// object has no toString at all, so `${value}` throws TypeError, uncaught,
+// outside every inspect()/configError() wrapper.
+//
+// A security fix that introduces a crash is still a regression, and this one
+// had three distinct bad shapes, all reproduced before the repair.
+
+const DICT_VALUED = (key) => {
+    const entries = { CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.0', CFBundleVersion: '1' };
+    return [
+        '<?xml version="1.0" encoding="UTF-8"?>', '<plist version="1.0">', '<dict>',
+        ...Object.entries(entries).map(([k, v]) => (k === key
+            ? `  <key>${k}</key><dict><key>a</key><string>b</string></dict>`
+            : `  <key>${k}</key><string>${v}</string>`)),
+        '</dict>', '</plist>', '',
+    ].join('\n');
+};
+
+test('a dict where a version string belongs does not crash the run', () => {
+    const ipa = makeIpa({ rawPlist: DICT_VALUED('CFBundleVersion'), web: { 'js/a.js': 'noop();' } });
+    const { code, out } = run(ipa, makeManifest({ webBundle: { root: 'public' }, infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 0, `must not throw on a dict-valued header field; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /Cannot convert object to primitive value/);
+    assert.doesNotMatch(out, /TypeError/);
+});
+
+test('the crash did not swallow a real violation', () => {
+    // The nastiest shape. The uncaught TypeError exits 1 -- the SAME code an
+    // honest violation uses -- so a CI gate reading only the exit code cannot
+    // tell "found a problem" from "died before looking", and the actual finding
+    // never prints. This fixture carries the canonical TCC violation AND a
+    // dict-valued header field.
+    const ipa = makeIpa({
+        rawPlist: DICT_VALUED('CFBundleVersion'),
+        web: { 'js/share.js': 'if (navigator.share) { shareCard(); }' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'navigator\\.share', requirePlistKey: 'NSPhotoLibraryAddUsageDescription', why: 'the TCC crash' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /does NOT declare NSPhotoLibraryAddUsageDescription/, 'the real finding must still be reported');
+});
+
+test('default and --json modes agree on the verdict for the same artifact', () => {
+    // The crash fired only in default mode, because only that path interpolated
+    // bundleId into a console.log. So the SAME artifact exited 1 with a stack
+    // trace or exited 0 CLEAN with "bundleId": {}, depending on an output flag.
+    // A verifier whose verdict depends on its output format is broken in a way
+    // no amount of reading catches.
+    const ipa = makeIpa({ rawPlist: DICT_VALUED('CFBundleIdentifier'), web: { 'js/a.js': 'noop();' } });
+    const manifest = makeManifest({ webBundle: { root: 'public' } });
+    const plain = run(ipa, manifest);
+    const asJson = spawnSync('node', [TOOL, '--ipa', ipa, '--manifest', manifest, '--json'], { encoding: 'utf8' });
+    assert.equal(plain.code, asJson.status, `same artifact, different exit code by output format: ${plain.code} vs ${asJson.status}`);
+    const parsed = JSON.parse(asJson.stdout);
+    assert.equal(parsed.bundleId, '<dict>', 'an unusable identity value must render honestly, not as {}');
+    assert.match(plain.out, /<dict>/);
+});
+
+// --- binary plist integers are signed at 8 and 16 bytes ---------------------
+
+test('a negative integer in a binary plist reads as negative', () => {
+    // CFBinaryPlist encodes every negative number as an 8-byte two's complement
+    // integer. Reading it unsigned turned -7 into 18446744073709552000 -- and
+    // that is not even the correct unsigned value, because the old accumulator
+    // lost precision past 2^53. Wrong twice over, and reported as drift against
+    // a perfectly well-formed plist.
+    const ipa = makeIpa({ rawPlist: binaryPlistOf({ CFBundleIdentifier: 'com.fixture.app', SomeNegative: -7 }) });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { SomeNegative: -7 } } }));
+    assert.equal(code, 0, out);
+    assert.doesNotMatch(out, /18446744073709552000/);
+});
+
+test('an integer beyond 2^53 is not silently rounded', () => {
+    // 2^53 + 1 has no exact Number representation, so returning one would round
+    // it and compare a value the file does not contain.
+    //
+    // The fixture is built from a PYTHON literal, not through binaryPlistOf.
+    // That helper serialises with JSON.stringify, so writing 9007199254740993
+    // in JS rounds it to ...992 before Python is ever reached -- the fixture
+    // would then carry the very value the test exists to rule out, and fail
+    // against correct code. Third fixture bug of this shape in one session, all
+    // the same lesson: do not build a fixture with the mechanism whose
+    // limitation is under test.
+    const ipa = makeIpa({
+        rawPlist: execFileSync('python3', ['-c',
+            'import plistlib,sys;sys.stdout.buffer.write(plistlib.dumps({"CFBundleIdentifier":"com.fixture.app","Big":9007199254740993}, fmt=plistlib.FMT_BINARY))'],
+        { maxBuffer: 1 << 20 }),
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { Big: '9007199254740993' } } }));
+    assert.equal(code, 0, out);
+});
+
+// --- mustContain says WHICH kind of absence it found ------------------------
+
+test('a mustContain match that exists only across files is reported as such', () => {
+    // Per-file matching fixed a false CLEAN and bought a possible false
+    // VIOLATION. "NOT found in any single shipped file" is true either way,
+    // which is the problem: it reads as absent when the honest answer may be
+    // "present, but not where this rule can see it".
+    const ipa = makeIpa({
+        webRoot: 'public',
+        plist: BASE_PLIST,
+        web: { 'js/a.js': 'function consentGranted() {', 'js/b.js': '  return true; }' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public', mustContain: [{ pattern: 'consentGranted\\(\\)\\s*\\{[\\s\\S]{0,60}return true', why: 'the consent gate must return true' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.match(out, /matches the shipped payload only ACROSS file boundaries/);
+});
+
+test('a genuinely absent mustContain pattern gets no cross-boundary note', () => {
+    // The false-positive guard: the note must fire on the split case only, or
+    // it becomes noise on every ordinary failure and stops being read.
+    const ipa = makeIpa({ webRoot: 'public', plist: BASE_PLIST, web: { 'js/a.js': 'noop();' } });
+    const manifest = makeManifest({
+        webBundle: { root: 'public', mustContain: [{ pattern: 'cioConsentGranted', why: 'consent gate' }] },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, out);
+    assert.doesNotMatch(out, /ACROSS file boundaries/);
+});
+
+// Builds a REAL binary plist with Python's plistlib, rather than by hand. The
+// hand-rolled bplist() writer above is deliberate for malformed fixtures, where
+// the point is to construct bytes no real encoder would emit. For well-formed
+// values the opposite is wanted: bytes Apple's own format actually produces, so
+// a test cannot pass against a fixture that shares the tool's misunderstanding.
+function binaryPlistOf(obj) {
+    const py = `import plistlib,sys,json;sys.stdout.buffer.write(plistlib.dumps(json.loads(sys.argv[1]), fmt=plistlib.FMT_BINARY))`;
+    return execFileSync('python3', ['-c', py, JSON.stringify(obj)], { maxBuffer: 1 << 20 });
+}

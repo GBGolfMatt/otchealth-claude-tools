@@ -168,9 +168,15 @@ says.
       "mustNotContain": [{ "pattern": "getUserMedia",      "why": "..." }]
     },
     "capabilityCoupling": [
-      { "ifBundleMatches": "navigator\\.share|canShare",
-        "requirePlistKey": "NSPhotoLibraryAddUsageDescription",
-        "why": "the share sheet writes to the library on the app's behalf" },
+      { "ifBundleMatches":  "navigator\\.share|canShare",
+        // Pair it. A share call ALONE does not imply a photo-library write --
+        // sharing a PDF offers Save to Files and never touches the library. An
+        // earlier version of this example omitted the conjunction and so taught
+        // exactly what the andBundleMatches section below warns against, which
+        // is worse than a wrong sentence: examples get copied, prose gets skimmed.
+        "andBundleMatches": "image/png|toBlob|toDataURL",
+        "requirePlistKey":  "NSPhotoLibraryAddUsageDescription",
+        "why": "a shared IMAGE reaches the library on the app's behalf via Save Image" },
       { "ifBundleMatches": "getUserMedia|mediaDevices",
         "requirePlistKey": "NSMicrophoneUsageDescription",
         "forbidIfUnreachable": true }

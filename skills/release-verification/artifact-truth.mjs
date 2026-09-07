@@ -11,10 +11,14 @@
 //   defect is present in the SOURCE of 42, 43 and 45 through 58 -- 16 tagged
 //   builds, every one in the repo's history until 59. That is a source-level
 //   blast radius, not 16 verified artifacts: those IPAs expired long ago, and
-//   this file's whole point is that the two are different. Apple's own
-//   binary scanner cannot catch it: that scanner does static API-surface
-//   analysis and the app links no PhotoKit -- the share sheet reaches the
-//   library for us. Only a real device shows it, as a runtime kill.
+//   this file's whole point is that the two are different. There is also
+//   nothing here for a symbol-based scan to find: the app links no PhotoKit
+//   at all, because the write happens inside UIActivityViewController on the
+//   user's behalf when they choose Save Image. Only a real device shows it,
+//   as a runtime kill. (An earlier version of this comment asserted what
+//   Apple's own scanner does internally. That was an unsourced claim about
+//   someone else's tooling, removed from SKILL.md and then left here -- a
+//   correction that reached the doc and not the code it describes.)
 //
 //   AWARE, 2026-09-06. The repo's www/ contains getUserMedia in two modules
 //   reachable from visible buttons, and the shipped Info.plist declares no
@@ -495,9 +499,29 @@ function parseBinaryPlist(buf) {
     if (marker === 0x09) return true;
     if (high === 0x1) {
       const n = 1 << low;
-      if (n > 8) throw new Error(`binary plist integer claims ${n} bytes, more than 8`);
+      if (n !== 1 && n !== 2 && n !== 4 && n !== 8 && n !== 16) {
+        throw new Error(`binary plist integer claims ${n} bytes, which is not one of the 1/2/4/8/16 the format allows`);
+      }
       need(pos + 1, n, 'integer');
-      return uint(pos + 1, n);
+      // 1, 2 and 4-byte integers are unsigned; 8 and 16-byte are SIGNED two's
+      // complement, which is how CFBinaryPlist encodes every negative number.
+      // Reading those unsigned turned -7 into 18446744073709552000 -- and note
+      // that is not even the correct unsigned value, because the old
+      // `v * 256 + byte` accumulator loses precision past 2^53, so the answer
+      // was wrong twice over. Observed live: `SomeNegative is
+      // 18446744073709552000, expected -7`, a fabricated violation about a
+      // perfectly well-formed plist.
+      if (n <= 4) return uint(pos + 1, n);
+      let v = 0n;
+      for (let b = 0; b < n; b++) v = (v << 8n) | BigInt(buf[pos + 1 + b]);
+      const bits = BigInt(n * 8);
+      if (v >= 1n << (bits - 1n)) v -= 1n << bits;
+      // Return a Number only when it round-trips exactly. Beyond the safe range
+      // a Number would silently round, and a rounded value compared against a
+      // manifest is the same class of quiet wrongness this whole branch exists
+      // to remove. A BigInt stringifies correctly for every comparison and
+      // message below.
+      return v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v;
     }
     if (high === 0x5) {
       const { len, next } = readLen(pos + 1, low);
@@ -942,6 +966,21 @@ const bundle = inspect('reading the shipped web bundle', () => {
   return b;
 });
 
+const plistHas = (k) => Object.prototype.hasOwnProperty.call(plist, k);
+const plistGet = (k) => (plistHas(k) ? plist[k] : undefined);
+// A short, safe rendering of any plist value. Never throws: with null-prototype
+// dicts, `String(someDict)` raises "Cannot convert object to primitive value",
+// and an unhandled throw here would defeat the exit-code contract as surely as
+// a wrong answer would.
+const describePlistValue = (v) => {
+  if (Buffer.isBuffer(v)) return `<${v.length}-byte data>`;
+  // JSON.stringify THROWS on a BigInt, and the violation messages below run it
+  // over whatever this returns, so render one as its digits here.
+  if (typeof v === 'bigint') return v.toString();
+  if (v !== null && typeof v === 'object') return Array.isArray(v) ? `<array of ${v.length}>` : '<dict>';
+  return v;
+};
+
 // --- 1. Info.plist expectations -------------------------------------------
 // Every read below goes through plistHas/plistGet, never bare `plist[k]` or
 // `k in plist`. Both readers now build their dicts with a null prototype, which
@@ -963,17 +1002,6 @@ const bundle = inspect('reading the shipped web bundle', () => {
 //
 // capabilityCoupling already guarded with hasOwnProperty. It was one of four
 // places that read the plist by a manifest-supplied key, and the only one.
-const plistHas = (k) => Object.prototype.hasOwnProperty.call(plist, k);
-const plistGet = (k) => (plistHas(k) ? plist[k] : undefined);
-// A short, safe rendering of any plist value. Never throws: with null-prototype
-// dicts, `String(someDict)` raises "Cannot convert object to primitive value",
-// and an unhandled throw here would defeat the exit-code contract as surely as
-// a wrong answer would.
-const describePlistValue = (v) => {
-  if (Buffer.isBuffer(v)) return `<${v.length}-byte data>`;
-  if (v !== null && typeof v === 'object') return Array.isArray(v) ? `<array of ${v.length}>` : '<dict>';
-  return v;
-};
 for (const r of (expect.infoPlist && expect.infoPlist.required) || []) {
   const v = plistGet(r.key);
   if (typeof v === 'string' ? v.trim() : v) passes.push(`plist requires ${r.key}: present`);
@@ -1024,8 +1052,30 @@ if (expect.webBundle) {
     }
     for (const c of expect.webBundle.mustContain || []) {
       const hits = bundle.files.filter((f) => rx(c.pattern).test(f.text)).map((f) => f.rel);
-      if (hits.length) passes.push(`bundle contains ${c.pattern} (in ${hits.slice(0, 3).join(', ')})`);
-      else violations.push({ rule: 'webBundle.mustContain', detail: `${c.pattern} NOT found in any single shipped file`, why: c.why });
+      if (hits.length) {
+        passes.push(`bundle contains ${c.pattern} (in ${hits.slice(0, 3).join(', ')})`);
+        continue;
+      }
+      violations.push({ rule: 'webBundle.mustContain', detail: `${c.pattern} NOT found in any single shipped file`, why: c.why });
+      // Per-file matching fixed a false CLEAN and bought a possible false
+      // VIOLATION in exchange: a genuinely split implementation -- a function
+      // opened in one module and closed in another, or a template partial a
+      // build step relocated -- satisfies the pattern across the payload while
+      // matching no single file. capabilityCoupling already reports exactly
+      // this shape for andBundleMatches rather than swallowing it; there is no
+      // reason mustContain should be quieter about the same trade.
+      //
+      // "NOT found in any single shipped file" is TRUE either way, and that is
+      // the problem: it reads as "absent" when the honest answer may be
+      // "present, but not where this rule can see it". So say which one it is.
+      const joined = bundle.files.map((f) => `\n/*${f.rel}*/\n${f.text}`).join('');
+      if (rx(c.pattern).test(joined)) {
+        notes.push(
+          `webBundle.mustContain ${c.pattern}: matches the shipped payload only ACROSS file boundaries, never within one file. ` +
+          'Either the implementation is genuinely split (in which case this rule cannot see it and the pattern should be narrowed to one file), ' +
+          'or the match is a coincidence between two unrelated files -- which is why this rule does not accept it as evidence.',
+        );
+      }
     }
   }
 }
@@ -1053,7 +1103,7 @@ if (expect.renderedVersion) {
     const id = expect.renderedVersion.elementId;
     const m = idxFile.text.match(compiled.get(RENDERED_VERSION_KEY));
     const rendered = m ? m[1].trim() : null;
-    const want = `v${plist.CFBundleShortVersionString}`;
+    const want = `v${describePlistValue(plistGet('CFBundleShortVersionString'))}`;
     if (rendered === want) passes.push(`rendered version tag "${rendered}" matches the binary`);
     else if (rendered === null) violations.push({ rule: 'renderedVersion', detail: `no element with id "${id}" and literal text found in ${idxFile.rel}`, why: 'either the tag was removed, or its text is rendered at runtime -- in which case this rule cannot verify it and should not be declared for this app' });
     else violations.push({ rule: 'renderedVersion', detail: `version tag renders ${JSON.stringify(rendered)}, binary is ${JSON.stringify(want)}`, why: 'the in-app version must match the build, and an unsubstituted template here also mis-tags every error report to a nonsense release' });
@@ -1157,8 +1207,8 @@ for (const rule of expect.capabilityCoupling || []) {
 const result = {
   app: manifest.app,
   ipa: path.basename(ipaPath),
-  bundleId: plist.CFBundleIdentifier,
-  version: `${plist.CFBundleShortVersionString} (${plist.CFBundleVersion})`,
+  bundleId: describePlistValue(plistGet('CFBundleIdentifier')),
+  version: `${describePlistValue(plistGet('CFBundleShortVersionString'))} (${describePlistValue(plistGet('CFBundleVersion'))})`,
   shippedBundleFiles: bundle.missing ? 0 : bundle.files.length,
   passes,
   notes,
