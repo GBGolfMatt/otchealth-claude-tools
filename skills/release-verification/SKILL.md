@@ -127,7 +127,12 @@ families, all optional — except that **any rule which reads the shipped bundle
 the whole `.app`, which is not what those rules make claims about: an `.app`
 carries localization strings, resource JSON and framework text, so a capability
 rule could match a file the web layer never contains. Omitting the root is
-exit 2, not a silently wider scan.
+**exit 3** — a manifest that cannot be used, caught before the IPA is opened —
+not a silently wider scan. An invalid root (absolute, or containing a `..`
+segment) is exit 3 for the same reason. The one root failure that is exit 2 is
+a root resolving out of the bundle *through a symlink*, because whether that
+happens depends on what the archive carries rather than on what the manifest
+says.
 
 ```jsonc
 {

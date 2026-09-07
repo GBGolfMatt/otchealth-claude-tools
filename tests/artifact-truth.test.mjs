@@ -1281,3 +1281,35 @@ test('a bad webBundle.root is refused before the artifact is even opened', () =>
     assert.match(out, /webBundle\.root/, 'the message must name the manifest field, not the missing file');
     assert.doesNotMatch(out, /ARTIFACT UNREADABLE/);
 });
+
+test('SKILL.md documents the exit code the tool actually returns for the omitted-root case', () => {
+    // Rounds 23, 24 and 25 were ONE drift travelling outward: the exit contract
+    // was fixed in the handler, then at the call site, then in the prose -- and
+    // each time the earlier fix was already believed. A claim that lives only in
+    // a document cannot be checked by the suite that proves the behaviour, so
+    // this ties the two together for the case that actually moved.
+    const skill = fs.readFileSync(path.join(ROOT, 'skills/release-verification/SKILL.md'), 'utf8');
+
+    // The tool's real answer for a manifest that reads the bundle without a root.
+    const ipa = makeIpa({ plist: BASE_PLIST });
+    // webBundle: null is how you actually omit the root -- makeManifest INJECTS
+    // { root: 'public' } otherwise, so the first draft of this test quietly
+    // exercised a valid manifest and read its exit 2 as a contradiction.
+    const manifest = makeManifest({
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+        webBundle: null,
+    });
+    const { code } = run(ipa, manifest);
+    assert.equal(code, 3, 'omitting webBundle.root must be a manifest error');
+
+    // And the sentence a reader relies on must say the same number.
+    const para = skill.match(/Omitting the root is[\s\S]{0,120}/);
+    assert.ok(para, 'SKILL.md should still explain what omitting the root does');
+    assert.match(para[0], /exit 3/, `SKILL.md must document exit ${code} here, not a stale one: ${para[0].slice(0, 80)}`);
+    assert.doesNotMatch(para[0], /exit 2/, 'the superseded exit 2 claim must not survive alongside it');
+
+    // The table must carry a row for every code the tool can return.
+    for (const c of ['`0`', '`1`', '`2`', '`3`']) {
+        assert.ok(skill.includes(c), `the exit table is missing a row for ${c}`);
+    }
+});
