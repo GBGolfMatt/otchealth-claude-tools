@@ -24,7 +24,7 @@
 //   pitfall  "<lesson>" --agent cfo [--share]
 //   status   "<what I'm working on / project status>" --agent cfo    # ALWAYS shared to the exec team
 //   entity   set <key> "<value>" --agent cfo [--source ..] [--share]  # deterministic current-value ("what is X now")
-//   entity   get <key> --agent cfo | list | alias "<from>" <to>       # latest-wins per key; alias many phrasings -> 1 key
+//   entity   get <key> --agent cfo | list | alias "<from>" <to> [--source ..] [--share]  # latest-wins per key; alias many phrasings -> 1 key
 //   entity   link <from-key> <relation> <to-key> --agent cfo [--source ..] [--share]  # append a relationship edge (from -relation-> to)
 //   entity   graph <key> --agent cfo [--hops 1|2]                     # 1-2 hop neighborhood walk over links, both directions ("what depends on X")
 //   recall   "<query>"  --agent cfo [--n 25]    # searches YOUR lane + the shared TEAM feed
@@ -43,6 +43,7 @@ import { writeAdvisory, RING_DENY } from "./dedupe.mjs";
 import { parseNdjson, serializeNdjson, nextId, isConflict, condHeaders } from "./blobwrite.mjs";
 import { kvSecret } from "./azure-secret.mjs";
 import { linkFields, walkGraph, formatEdge } from "./entity-graph.mjs";
+import { buildAliasEntry } from "./entity-alias.mjs";
 import { getTextFromS3, getTextMetaFromS3, putObjectToS3, listBlobsFromS3, s3Configured } from "./s3-blob.mjs";
 import { awsCredsPresent } from "./aws-secret.mjs";
 import { FAILED_WRITE_FILE, appendFailedWriteFallback } from "./local-fallback.mjs";
@@ -636,9 +637,31 @@ async function entityCmd() {
   }
   if (sub === "alias") {
     const from = normKey(positional[1] || ""), to = normKey(positional[2] || "");
-    if (!from || !to) { console.error('usage: mem.mjs entity alias "<from-phrasing>" <to-canonical-key> --agent <a>'); process.exit(2); }
-    const { entry } = await commitAppend((freshRows) => ({ id: newId(freshRows), ts: new Date().toISOString(), type: "alias", ekey: from, evalue: to, text: `alias ${from} -> ${to}`, tags: TAGS, by: AGENT }));
-    console.log(`[kb-memory] alias ${from} -> ${to} -> ${AGENT} id=${entry.id}.`);
+    if (!from || !to) { console.error('usage: mem.mjs entity alias "<from-phrasing>" <to-canonical-key> --agent <a> [--source "..."] [--share]'); process.exit(2); }
+    let fromRef, toRef, prevRef;
+    const { entry } = await commitAppend((freshRows) => {
+      fromRef = normKey(positional[1] || "");
+      toRef = resolveAlias(freshRows, positional[2] || "");
+      if (fromRef === toRef) throw new Error(`entity alias must not point ${fromRef} to itself`);
+      if (!currentEntity(freshRows, toRef)) throw new Error(`entity alias target does not exist: ${toRef}`);
+      const built = buildAliasEntry(freshRows, {
+        fromKey: fromRef,
+        toKey: toRef,
+        id: newId(freshRows),
+        ts: new Date().toISOString(),
+        tags: TAGS,
+        by: AGENT,
+        source: SOURCE || undefined,
+        supersedePrevious: !CROSS,
+      });
+      prevRef = built.previous;
+      return built.entry;
+    });
+    let shared = false;
+    if (SHARE) shared = await publishShared(AGENT, entry);
+    // Alias rows are lookup metadata, not semantic facts. Publishing makes them visible to the
+    // gateway's cached shared-feed entity loader without paying for an embedding/index write.
+    console.log(`[kb-memory] alias ${fromRef} -> ${toRef} -> ${AGENT} id=${entry.id}${prevRef ? ` (was: ${prevRef.evalue})` : ""}${shared ? "; shared" : ""}.`);
     return;
   }
   if (sub === "set") {
@@ -691,7 +714,7 @@ async function entityCmd() {
     for (const e of g.edges.slice().sort((a, b) => a.depth - b.depth)) console.log(`  [hop ${e.depth}] ${formatEdge(e)}`);
     return;
   }
-  console.error('usage: mem.mjs entity set <key> "<value>" | get <key> | list | alias "<from>" <to> | link <from-key> <relation> <to-key> | graph <key> [--hops 1|2]   --agent <a> [--share]');
+  console.error('usage: mem.mjs entity set <key> "<value>" | get <key> | list | alias "<from>" <to> | link <from-key> <relation> <to-key> | graph <key> [--hops 1|2]   --agent <a> [--source "..."] [--share]');
   process.exit(2);
 }
 
