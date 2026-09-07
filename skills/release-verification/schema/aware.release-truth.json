@@ -21,7 +21,7 @@
         "ifBundleMatches": "getUserMedia|mediaDevices",
         "requirePlistKey": "NSMicrophoneUsageDescription",
         "forbidIfUnreachable": true,
-        "why": "Two-way rule. If the shipped bundle can reach the microphone the key must be declared or iOS kills the app; if it cannot, declaring the key over-claims a permission the app never uses and invites App Review questions. The ios-depot workflow asserts this key is ABSENT, and this proves that assertion is correct rather than merely asserted."
+        "why": "Two-way rule. If the shipped bundle's text matches a microphone pattern the key must be declared or iOS kills the app; if nothing matches, declaring the key over-claims a permission the app never uses and invites App Review questions. Stated as a text match, not as reachability, because that is all this tool establishes. The ios-depot workflow asserts this key is ABSENT, and this proves that assertion is correct rather than merely asserted."
       },
       {
         "ifBundleMatches": "navigator\\.share|canShare",

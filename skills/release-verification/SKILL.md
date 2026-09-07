@@ -52,8 +52,9 @@ lesson trustworthy rather than a rule of thumb:
   to the real crash above. But the PUBLIC build assembles a different bundle
   and the shipped IPA contains no `getUserMedia` anywhere.
 
-One rule resolves both: **if the shipped bundle can reach a privacy-sensitive
-API, the shipped Info.plist must declare it.** Derive the requirement from the
+One rule resolves both: **if the shipped bundle's text matches a
+privacy-sensitive API's pattern, the shipped Info.plist must declare it.**
+Derive the requirement from the
 artifact instead of maintaining a per-app list of expected keys. That single
 rule flags iHEARtest's missing key *and* clears AWARE's absent key. Opposite
 verdicts, no special-casing, and it stays right when an app changes.

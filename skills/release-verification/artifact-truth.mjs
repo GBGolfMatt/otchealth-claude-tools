@@ -28,8 +28,9 @@
 //
 // THE CENTRAL IDEA is `capabilityCoupling`: rather than maintaining a
 // hand-written list of "this app needs that key", DERIVE the requirement from
-// what the shipped bundle actually does. If the shipped web layer can reach a
-// privacy-sensitive API, the shipped Info.plist must declare it. That single
+// what the shipped bundle actually contains. If the shipped web layer's TEXT
+// MATCHES a privacy-sensitive API's pattern, the shipped Info.plist must
+// declare it. That single
 // rule catches iHEARtest's crash automatically AND clears AWARE's absent key
 // rather than leaving it suspicious -- the same rule, opposite verdicts, no
 // per-app special-casing.
@@ -561,8 +562,11 @@ if (expect.renderedVersion) {
 }
 
 // --- 3. Capability coupling: the rule that generalizes ---------------------
-// If the SHIPPED bundle can reach a privacy-sensitive API, the SHIPPED
-// Info.plist must declare it. Derived, not hand-maintained -- which is why it
+// If the SHIPPED bundle's TEXT MATCHES a privacy-sensitive API's pattern, the
+// SHIPPED Info.plist must declare it. Never phrase this as "can reach": that
+// would claim a control-flow analysis nobody ran, and these lines get pasted
+// into PR comments where the qualifier is lost.
+// Derived, not hand-maintained -- which is why it
 // flags iHEARtest's missing photo key and simultaneously clears AWARE's
 // absent microphone key as correct.
 for (const rule of expect.capabilityCoupling || []) {

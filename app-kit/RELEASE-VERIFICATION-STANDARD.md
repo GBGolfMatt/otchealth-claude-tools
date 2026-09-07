@@ -179,7 +179,8 @@ returned nothing before 2026-09-06: no tool in the toolkit had ever opened a
 shipped artifact. Full operating manual in that skill's `SKILL.md`; the short
 version is that source is a claim and the artifact is the fact, and the central
 mechanism is `capabilityCoupling` — derive required Info.plist keys from what
-the shipped bundle can actually reach, rather than maintaining a per-app list.
+the shipped bundle's text actually matches, rather than maintaining a per-app
+list.
 
 Proven both directions before adoption, with the evidence graded honestly. The
 Build 58 run that caught all three known defects is **historical and not
@@ -202,8 +203,11 @@ invisible to it by construction.
 
 Today the fleet's only real-device testing is the AWS Device Farm **built-in
 fuzz suite**: random input, 20-minute budget. Across all 21 Device Farm runs
-this fleet has ever executed — iHEARtest, AWARE, Flatstick, PlantID — **every
-single one was `BUILTIN_FUZZ`. Zero scripted runs, ever.**
+the account still returns — iHEARtest, AWARE, Flatstick, PlantID — **every
+single one was `BUILTIN_FUZZ`: zero scripted runs among them.** A run aged out
+of retention would not appear, so read it as every run visible to us, which is
+what the claim needs: nobody has scripted anything. Same scope qualification as
+`receipts/DEVICE-FARM-CENSUS.md`, which is the evidence for this paragraph.
 
 Random testing is not a gate, it is a lottery. The TCC crash is present in the source of 16 tagged
 builds and was caught only when one seed happened to walk into the share sheet.

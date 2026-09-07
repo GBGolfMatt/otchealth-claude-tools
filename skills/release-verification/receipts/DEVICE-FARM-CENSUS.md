@@ -10,7 +10,7 @@ All of the below was read live from AWS account `900915535335`, region
 `us-west-2`, on **2026-09-06**, via SigV4 `POST /` with
 `x-amz-target: DeviceFarm_20150623.<Operation>`.
 
-## Every run this fleet has executed is a built-in fuzz run
+## Every run the account still returns is a built-in fuzz run
 
 `ListProjects`, then `ListRuns` per project ARN (paging `nextToken`), tallying
 `.runs[].type`:
@@ -24,7 +24,9 @@ TOTAL RUNS: 21
 BY TYPE: {"BUILTIN_FUZZ":21}
 ```
 
-21 runs, one type. **Zero scripted runs, ever.** (There are two projects named
+21 runs, one type: **zero scripted runs among them** (scope qualified two
+paragraphs down, and the qualification travels with every restatement of this
+number). (There are two projects named
 `iHEARtest`; the empty one is a duplicate. It is listed rather than tidied away
 because the tally has to account for every project the API returns.)
 
