@@ -26,6 +26,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { closeConnection } from "../kb-memory/pg-state.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import * as cosmos from "./cosmos-client.mjs";
@@ -419,6 +420,11 @@ if (isMain) {
       else if (cmd === "sweep") await sweep();
       else if (cmd === "metrics") await metrics();
       else { console.error('usage: decision.mjs open --category <c> --owner <a> [--expected-by <ISO>] [--evidence <link>] [--terminal-policy <block|escalate|proceed>] | ack <id> --owner <a> | close <id> --owner <a> | list [--owner <a>] [--overdue] [--json] | sweep [--dispatch] [--json] | metrics [--json]'); process.exit(2); }
-    } catch (e) { console.error("decision-clock ERROR: " + e.message); process.exit(1); }
+    } catch (e) { console.error("decision-clock ERROR: " + e.message); process.exitCode = 1; }
+    finally {
+      try { await closeConnection(); }
+      catch { console.error("[decision-clock] state connection cleanup failed"); process.exitCode = 1; }
+    }
   })();
 }
+

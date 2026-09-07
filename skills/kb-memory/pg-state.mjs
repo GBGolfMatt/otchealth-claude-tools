@@ -100,13 +100,21 @@ async function getConn() {
   return _conn;
 }
 
+/** Close the CLI-owned connection after all work settles. A referenced PostgreSQL socket
+ * otherwise keeps Node alive after a successful scan/sweep and leaks one server slot per cron.
+ * Idempotent; does not resolve credentials or connect when nothing was opened. */
+export async function closeConnection() {
+  const conn = _conn;
+  _conn = null;
+  if (conn) await conn.end();
+}
+
 /** Test-only: drop the memoized config + connection so a test can point this module at a different
  *  (scratch/local) Postgres instance without cross-contaminating another test's state. Mirrors
  *  cosmos-auth.mjs's _resetAadTokenCacheForTests() -- same purpose, same naming convention. A no-op
  *  in any real call path; nothing here is invoked by createDoc/readDoc/etc. */
 export async function _resetForTests() {
-  if (_conn) { try { await _conn.end(); } catch { /* best-effort */ } }
-  _conn = null;
+  try { await closeConnection(); } catch { /* best-effort */ }
   _cfg = undefined;
 }
 
@@ -223,3 +231,4 @@ export async function queryDocs(coll, query, parameters = [], opts = {}) {
 export function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`;
 }
+

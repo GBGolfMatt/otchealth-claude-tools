@@ -21,6 +21,7 @@
 //     except a bad CLI usage which exits 2).
 //   - Cooldown + consecutive-escalate (schema.shouldFire) stop a flapping metric from spamming an inbox.
 import { execFileSync } from "node:child_process";
+import { closeConnection } from "../kb-memory/pg-state.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, posthogEmit } from "./common.mjs";
@@ -225,6 +226,11 @@ if (isMain) {
     try {
       if (cmd === "scan") await scan();
       else { console.error("usage: radar.mjs scan [--emit] [--json] [--only <detector-name>]"); process.exit(2); }
-    } catch (e) { console.error("signal-radar ERROR: " + e.message); process.exit(0); } // fail-open at the top level too
+    } catch (e) { console.error("signal-radar ERROR: " + e.message); process.exitCode = 0; } // preserve the existing fail-open policy
+    finally {
+      try { await closeConnection(); }
+      catch { console.error("[signal-radar] state connection cleanup failed"); process.exitCode = 1; }
+    }
   })();
 }
+
