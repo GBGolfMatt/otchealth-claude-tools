@@ -460,6 +460,44 @@ function parseXmlPlist(text) {
   return root;
 }
 
+// Return the spans of HTML that sit OUTSIDE comments, as separate strings.
+//
+// Deliberately not "strip the comments and search the result". Two defects made
+// the one-line `.replace(/<!--[\s\S]*?-->/g, '')` wrong, and CodeQL flagged the
+// first as incomplete multi-character sanitization:
+//
+//   1. Deleting a comment can SYNTHESISE the delimiter it removes. Given
+//      `<!<!-- -->-- >`, the match starts at index 2, and cutting it joins the
+//      surrounding `<!` and `-- >` into `<!-- >` -- a comment opener that was
+//      never in the document. Any later reasoning is then about text the file
+//      does not contain.
+//   2. An UNTERMINATED `<!--` matched nothing, so everything after it survived.
+//      A browser treats an unclosed comment as running to EOF, so that left
+//      elements the user never sees available to be read as the live version
+//      tag: a wrong answer in the dangerous direction.
+//
+// Returning SPANS fixes both at the root. Nothing is ever concatenated, so no
+// delimiter can be manufactured across a cut, and an unterminated comment
+// simply ends the last span. Each span is searched on its own, which is also
+// the honest model: an element cannot straddle a comment boundary.
+function htmlSpansOutsideComments(html) {
+  const spans = [];
+  let start = 0;
+  for (let i = 0; i < html.length;) {
+    if (html.startsWith('<!--', i)) {
+      spans.push(html.slice(start, i));
+      const end = html.indexOf('-->', i + 4);
+      if (end < 0) return spans; // unterminated: the remainder is comment, as a browser reads it
+      i = end + 3;
+      start = i;
+      continue;
+    }
+    i++;
+  }
+  spans.push(html.slice(start));
+  return spans;
+}
+
 // Binary plist dates count seconds from 2001-01-01 UTC, not the Unix epoch.
 const APPLE_EPOCH_MS = Date.UTC(2001, 0, 1);
 
@@ -1272,10 +1310,12 @@ if (expect.renderedVersion) {
     // first and scripts that query it may find either, so which one "the
     // version tag" means is genuinely ambiguous -- and guessing is what this
     // tool refuses to do everywhere else.
-    const htmlWithoutComments = idxFile.text.replace(/<!--[\s\S]*?-->/g, '');
     const rx = compiled.get(RENDERED_VERSION_KEY);
-    rx.lastIndex = 0;
-    const all = [...htmlWithoutComments.matchAll(rx)];
+    const all = [];
+    for (const span of htmlSpansOutsideComments(idxFile.text)) {
+      rx.lastIndex = 0;
+      all.push(...span.matchAll(rx));
+    }
     if (all.length > 1) {
       violations.push({
         rule: 'renderedVersion',

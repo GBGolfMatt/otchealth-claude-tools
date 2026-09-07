@@ -206,9 +206,13 @@ Today the fleet's only real-device testing is the AWS Device Farm **built-in
 fuzz suite**: random input, 20-minute budget. Across all 21 Device Farm runs
 the account still returns — iHEARtest, AWARE, Flatstick, PlantID — **every
 single one was `BUILTIN_FUZZ`: zero scripted runs among them.** A run aged out
-of retention would not appear, so this supports **no scripted device testing in
-use** — a suite anyone relied on would leave recent runs — rather than the
-historical claim that nobody ever scripted one. Same scope qualification as
+of retention would not appear. So the count strictly supports one claim: **none
+of the 21 runs the account still returns was scripted.** Reading that as "no
+scripted device testing in use" adds an assumption — that a suite anyone
+actually relied on would leave runs inside the retention window — which is
+reasonable but is an inference, not the evidence, and is stated here rather than
+smuggled in. It does not support the historical claim that nobody ever scripted
+one. Same scope qualification as
 `receipts/DEVICE-FARM-CENSUS.md`, which is the evidence for this paragraph.
 
 Random testing is not a gate, it is a lottery. The TCC crash is present in the source of 16 tagged

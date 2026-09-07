@@ -101,7 +101,7 @@ so it needs no `plistlib`, no macOS, and no Xcode.
 |------|---------|
 | `0`  | Every declared expectation held. |
 | `1`  | At least one violation. The report names the rule, what it saw, and why it matters. |
-| `2`  | **Could not inspect the artifact at all.** Deliberately distinct from 0. A verifier that cannot read the thing has proven nothing, and must never print a pass. |
+| `2`  | **Could not inspect the artifact at all.** Deliberately distinct from 0. A verifier that cannot read the thing has proven nothing, so it must never print a pass — **and never a finding either**. That second half is the one that gets forgotten, and it was violated for real: a truncated `Info.plist` read every key past the cut as absent, so a coupling rule announced a missing `NSMicrophoneUsageDescription` it had never actually looked at. |
 | `3`  | **The verifier itself is unusable** — missing arguments, an unreadable or invalid manifest, a rule that will not compile. Separate from 2 because 2 is a claim about the BUILD and 3 is a claim about our own configuration. Both block. Printing 2 when 3 is true sends someone to debug an artifact that is fine. |
 
 That third exit code is the whole reason to trust the other two. The failure
@@ -281,8 +281,8 @@ stays correct if the substitution mechanism is ever rewritten. **Assert what
 the user sees, not how the build produces it** — a good general rule for any
 artifact check.
 
-That promise was FALSE for as long as the rule existed, and it took thirty
-adversarial rounds to surface. The match ran against the raw HTML and used
+That promise was FALSE for as long as the rule existed, and every prior review
+round on this branch missed it. The match ran against the raw HTML and used
 `.match()` without `/g`, so it found the FIRST occurrence of the id anywhere in
 the file — including inside a comment. A leftover template comment holding the
 correct string, above a live element rendering a stale one, produced

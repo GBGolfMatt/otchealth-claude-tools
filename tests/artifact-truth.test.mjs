@@ -2254,3 +2254,35 @@ test('--json emits a parseable envelope on exit 2 and exit 3', () => {
     assert.equal(parsedThree.verdict, 'VERIFIER_MISCONFIGURED');
     assert.equal(parsedThree.exitCode, 3);
 });
+
+test('an element after an UNTERMINATED comment is not read as the live version', () => {
+    // A browser treats an unclosed `<!--` as commenting out the rest of the
+    // document, so nothing after it is rendered. The regex strip this replaced
+    // matched nothing in that case and left the whole tail in the searched
+    // text, where a version tag the user never sees could be read as the live
+    // one -- wrong in the dangerous direction.
+    const ipa = makeIpa({
+        rawPlist: RV_PLIST(),
+        web: { 'index.html': '<span id="app-version-tag">v1.6.0</span>\n<!-- never closed\n<span id="app-version-tag">v9.9.9</span>' },
+    });
+    const { code, out } = run(ipa, RV_MANIFEST());
+    assert.equal(code, 0, `only the pre-comment element is rendered; got ${code}: ${out}`);
+    assert.match(out, /matches the binary/);
+    assert.doesNotMatch(out, /v9\.9\.9/, 'an element inside an unterminated comment is not live');
+});
+
+test('removing a comment cannot manufacture a version tag across the cut', () => {
+    // CodeQL's "incomplete multi-character sanitization" class, in the shape
+    // that matters here. Deleting a comment from the middle of a string can
+    // join its neighbours into markup neither side contained. Searching SPANS
+    // instead of a stripped string makes that structurally impossible: nothing
+    // is ever concatenated across a cut.
+    const ipa = makeIpa({
+        rawPlist: RV_PLIST(),
+        web: { 'index.html': '<span id="app-version-tag">v1.6.0</span>\n<span id="app-vers<!-- x -->ion-tag">v9.9.9</span>' },
+    });
+    const { code, out } = run(ipa, RV_MANIFEST());
+    assert.equal(code, 0, `the split attribute must not become a real id; got ${code}: ${out}`);
+    assert.doesNotMatch(out, /v9\.9\.9/);
+    assert.doesNotMatch(out, /contains 2 elements/, 'text joined across a comment cut is not a second element');
+});
