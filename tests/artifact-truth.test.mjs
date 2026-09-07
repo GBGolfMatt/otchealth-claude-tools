@@ -2094,12 +2094,33 @@ test('the five predefined entities and numeric references still decode', () => {
     assert.equal(code, 0, out);
 });
 
-test('a bare ampersand that forms no entity reference is left alone', () => {
-    // The regex only matches `&name;` and `&#nnn;`. A stray `&` is technically
-    // invalid XML too, but it is not an entity reference, and widening the
-    // refusal to cover it would reject strings that carry no ambiguity about
-    // what they mean.
-    const ipa = makeIpa({ rawPlist: ENTITY_PLIST('Tom &amp; Jerry 50 &gt; 40') });
-    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: 'Tom & Jerry 50 > 40' } } }));
+test('a bare ampersand that forms no entity reference is exit 2', () => {
+    // This test previously asserted the OPPOSITE, and it was wrong. The commit
+    // that refused `&widget;` argued that reporting a verdict on a document no
+    // XML parser accepts is what exit 2 exists to prevent -- and then exempted
+    // a bare `&` one line later, on the grounds that it "carries no ambiguity
+    // about what it means". That is the identical "leave it visible" reasoning
+    // the same commit had just rejected, applied inside the commit rejecting
+    // it, and pinned by this test.
+    //
+    // The evidence settles it both ways: ElementTree rejects
+    // `<string>a & b</string>` as not well-formed, and Apple's own writer emits
+    // `a &amp; b`, so a bare `&` never appears in a legitimately produced plist.
+    // Refusing it costs nothing real and makes the two checks agree.
+    const ipa = makeIpa({ rawPlist: ENTITY_PLIST('Tom & Jerry') });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: 'Tom & Jerry' } } }));
+    assert.equal(code, 2, `a bare ampersand is not well-formed XML; got ${code}: ${out}`);
+    assert.match(out, /bare "&"/);
+    assert.doesNotMatch(out, /VERDICT: CLEAN/);
+});
+
+test('an escaped ampersand and a literal one inside CDATA both still work', () => {
+    // The false-positive guard for the refusal above, covering the one place a
+    // bare `&` IS legal: inside CDATA, where it is literal by definition. The
+    // check lives in decode(), which readText applies only to ordinary
+    // character data, so CDATA is exempt by construction rather than by a
+    // special case -- but that is worth a test rather than a claim.
+    const ipa = makeIpa({ rawPlist: ENTITY_PLIST('Tom &amp; Jerry <![CDATA[ & Spike ]]>50 &gt; 40') });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { N: 'Tom & Jerry  & Spike 50 > 40' } } }));
     assert.equal(code, 0, out);
 });

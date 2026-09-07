@@ -265,7 +265,26 @@ function parseXmlPlist(text) {
   };
 
   const ENTITY = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
-  const decode = (raw) => raw.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, e) => {
+  // A bare `&` that begins no reference is invalid XML, and the previous commit
+  // got this wrong in a way worth recording. It refused `&widget;` on the
+  // grounds that reporting a verdict on a document no parser accepts is what
+  // exit 2 is for -- and then exempted a bare `&` one line later, reasoning
+  // that it "carries no ambiguity about what it means". That is the identical
+  // argument ("leave it visible") that had just been rejected for the named
+  // case, applied inside the commit rejecting it, with a test written to pin
+  // the exception.
+  //
+  // Both checks now agree, because the evidence does: ElementTree rejects
+  // `<string>a & b</string>` as not well-formed, and Apple's own writer emits
+  // `a &amp; b`, so a bare `&` never appears in a legitimately produced plist.
+  // Note this runs inside decode(), which readText applies only to ordinary
+  // character data -- CDATA content is spliced in raw and stays exempt, which
+  // is correct, since `&` is literal and legal inside CDATA.
+  const BARE_AMP = /&(?!(?:#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);)/;
+  const decode = (raw) => {
+    const bad = raw.match(BARE_AMP);
+    if (bad) fail(`contains a bare "&" that begins no entity reference (near ${JSON.stringify(raw.slice(Math.max(0, bad.index - 12), bad.index + 12))}), so it is not well-formed XML`);
+    return raw.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, e) => {
     if (Object.prototype.hasOwnProperty.call(ENTITY, e)) return ENTITY[e];
     // An undefined named entity makes the document invalid XML, full stop. This
     // used to return the text unchanged, under a comment saying that was better
@@ -282,7 +301,8 @@ function parseXmlPlist(text) {
     const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
     if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) fail(`uses the out-of-range character reference &${e};`);
     return String.fromCodePoint(code);
-  });
+    });
+  };
 
   // Character data up to the next element, with CDATA spliced in and entities
   // decoded. The old reader did not decode entities at all, so a CFBundleName
