@@ -22,6 +22,7 @@ test("seed plan refuses unsafe inventory or a differing existing value", () => {
   assert.equal(JSON.stringify(plan).includes("different"), false);
 });
 
+// Prevent a malicious near-match from being accepted as the gateway safety contract.
 test("seed plan requires an exact tag token, not a substring", () => {
   const { phrase, target } = ALIAS_SEED[0];
   const plan = planSeed({ ok: true }, [{
