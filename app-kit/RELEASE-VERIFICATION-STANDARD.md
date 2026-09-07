@@ -243,6 +243,25 @@ The ladder out, cheapest first:
    materially more work than it looks. Treat it as an open question to settle
    with one throwaway test before planning around it.
 
+   **Two constraints on that throwaway test, from a 2026-09-07 source pass that
+   found no Apple-authoritative answer and so did NOT settle the question.**
+   First, *run it on a real device, not the simulator.* An Appium issue reports
+   web-view children invisible on the iOS simulator (page source shows only the
+   `XCUIElementTypeWebView` container) while the same app on a real device
+   behaves correctly. If that holds, a simulator probe answers "unreachable"
+   when the real answer on our Device Farm iPhone 16 is "reachable" — the
+   pessimistic direction, which would send us building a webview-context
+   mechanism we do not need. Second, *assert on what the test can actually match.*
+   Practitioner sources consistently report that HTML ids and accessibility
+   identifiers do NOT cross the WKWebView boundary, and that matching is by
+   label, value, or placeholder. If so, every web-layer assertion is bound to
+   visible text, which for us is locale-coupled: iHEARtest ships en and es,
+   AWARE ships en, es, it, ko. So the probe must check both halves — that a
+   descendant of the web view is found at all, and whether it can be addressed
+   by identifier or only by visible text. Note the second source is weaker
+   evidence than the first: it is Appium-through-WebDriverAgent, not raw
+   XCUITest, so it carries an extra layer that could itself be the cause.
+
    What IS established: this is where class B items needing a real device go,
    and the ones that touch native UI rather than web content — item 16 (Save
    Image) becomes "tap share, tap Save Image, assert the app is still alive and
