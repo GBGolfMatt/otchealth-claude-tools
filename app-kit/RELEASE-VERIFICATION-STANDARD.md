@@ -124,6 +124,14 @@ file's sha256, the gate runs `--ipa "$IPA_PATH"`, and `altool --upload-package`
 transmits `"$IPA_PATH"`. Same variable, same file, same job, no rebuild in
 between — so the gate inspects the byte-identical file that reaches TestFlight,
 and the attested hash makes that identity recorded rather than merely structural.
+Receipt, because this wiring lives outside this repo and a reader cannot see it
+in the diff: in `iheartest/.github/workflows/ios-depot.yml` at
+`claude/release-verification-gate` (`2ec80aa`, PR #254), `IPA_PATH` is written
+to `GITHUB_ENV` from the export at line 320, hashed by the attestation at 349,
+passed to the gate at 388, stored by `actions/upload-artifact` at 400, sent to
+Device Farm at 449, and handed to `altool --validate-app` at 494 and
+`--upload-package` at 498. On `main` before #254 merges everything but the
+gate step (388) is already there; the gate is what #254 adds.
 Keep that property when porting: if a workflow ever re-exports or re-signs
 between the gate and the upload, the gate stops being evidence about what ships.
 
@@ -216,14 +224,21 @@ one. Same scope qualification as
 `receipts/DEVICE-FARM-CENSUS.md`, which is the evidence for this paragraph.
 
 Random testing is not a gate, it is a lottery. The TCC crash is present in the source of 16 tagged
-builds and was caught only when one seed happened to walk into the share sheet.
+builds (enumerated from the tags) and was first surfaced by a Device Farm fuzz
+run's crash report, never by any source-side gate. How the fuzz reached the
+share sheet that time, and why no earlier run had, is not recorded (those runs
+have expired), so this document does not claim a mechanism; it claims only that
+sixteen builds shipped it and a random run found it.
 The ladder out, cheapest first:
 
 1. **Pin the fuzz seed** (`test.parameters.seed`). Zero new infrastructure,
    available today. Converts "random every time" into "the identical event
-   sequence every time" — so a crash reproduces, and a fix is provably a fix
-   rather than a different roll. Do this immediately; it is the highest
-   value-per-effort item in this document.
+   sequence every time" — so a crash reproduces, and a fix can be re-tested
+   against the exact sequence that crashed rather than against a different
+   roll. That is negative evidence about one sequence, not proof the defect
+   class is gone; the rule above that finite device testing is negative
+   evidence stands. Do this immediately; it is the highest value-per-effort
+   item in this document.
 2. **XCTest UI (XCUITest).** Verified live against our own account:
    `BUILTIN_FUZZ`, `XCTEST` and `XCTEST_UI` are all compatible with the existing
    `iheartest-iphone16` pool **with no custom-environment YAML and no change to
