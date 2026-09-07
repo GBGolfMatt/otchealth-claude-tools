@@ -3,8 +3,10 @@
 Where each IPA in `REAL-ARTIFACT-RECEIPTS.md` came from. Maintained by hand,
 because a build run knows things the verifier cannot see from the bytes.
 
-GitHub Actions expires artifacts 14 days after the run, so an entry older than
-that is a historical record rather than a fetch recipe. Re-cut the build, or use
+`ios-depot.yml` sets `retention-days: 14` on the IPA upload, so an entry older
+than that is a historical record rather than a fetch recipe. That number is this
+workflow's own setting, not a GitHub-wide rule -- the platform default is 90
+days -- so check the workflow rather than assuming it if this is ever ported. Re-cut the build, or use
 the TestFlight build of record, if you need to re-verify after expiry.
 
 **Every row carries a run id, an artifact id and the artifact's zip digest**, so
@@ -18,8 +20,8 @@ two AWARE rows originally carried only a TestFlight tag, which made them
 unre-fetchable for no reason other than that I had not written the ids down; a
 review pass caught the asymmetry with the iHEARtest row. **Checked 2026-09-06:
 all three artifacts report `expired: false`**, so as of today the receipts are
-re-derivable end to end, not merely historical. That will lapse on the 14-day
-clock, which is the point of recording the digests now.
+re-derivable end to end, not merely historical. That will lapse on the workflow's
+14-day retention clock, which is the point of recording the digests now.
 
 | App / build | IPA sha256 | Where it came from |
 |---|---|---|

@@ -3,7 +3,7 @@
 # shipped IPAs.
 #
 # Receipts are a record of runs against artifacts too large to commit (~220 MB
-# each) and too short-lived to link (GitHub Actions expires them after 14 days).
+# each) and too short-lived to link (ios-depot.yml sets retention-days: 14).
 # They exist because a claim like "the shipped build verifies clean" is not
 # checkable from a diff, and an uncheckable claim is the thing this standard is
 # against. They do NOT replace tests/artifact-truth.test.mjs, which is what runs
@@ -42,7 +42,7 @@ OUT="$HERE/REAL-ARTIFACT-RECEIPTS.md"
   echo
   echo "WHAT THIS IS NOT. A receipt says what happened once. It does not replace"
   echo "\`tests/artifact-truth.test.mjs\`, which runs in CI and pins what must KEEP being"
-  echo "true. IPAs are ~220 MB and expire from GitHub Actions after 14 days, so they are"
+  echo "true. IPAs are ~220 MB and expire on ios-depot.yml's retention-days: 14, so they are"
   echo "not committed and cannot be linked; SOURCES.md is how you obtain the same ones."
   echo "Tool commit: $(git -C "$SKILL" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "Captured: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -57,7 +57,7 @@ for arg in "$@"; do
   {
     echo "## $app"
     echo
-    echo "IPA sha256: \`$(sha256sum "$ipa" | cut -d' ' -f1)\`"
+    echo "IPA sha256: \`$(sha256_of "$ipa")\`"
     echo
     echo '```'
     echo "\$ node artifact-truth.mjs --ipa <shipped>.ipa --manifest schema/$app.release-truth.json"
@@ -65,6 +65,16 @@ for arg in "$@"; do
     node "$SKILL/artifact-truth.mjs" --ipa "$ipa" --manifest "$manifest" 2>&1
     echo "exit=$?"
     set -e
+
+# sha256sum is GNU coreutils and is absent on macOS, which is the platform an
+# iOS engineer is most likely to run this on. The old call would abort under
+# `set -e` AFTER the output file had already been truncated, leaving a corrupt
+# receipt -- a failure that destroys the artifact it was regenerating. Node is
+# already a hard dependency of this script (it runs artifact-truth.mjs), so use
+# it and drop the platform question entirely.
+sha256_of() {
+  node -e 'const c=require("node:crypto"),f=require("node:fs");const h=c.createHash("sha256");h.update(f.readFileSync(process.argv[1]));process.stdout.write(h.digest("hex"))' "$1"
+}
     echo '```'
     echo
   } >> "$OUT"

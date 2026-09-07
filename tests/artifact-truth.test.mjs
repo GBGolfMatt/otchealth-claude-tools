@@ -78,9 +78,14 @@ function makeManifest(expect) {
     return f;
 }
 
-function run(ipa, manifest) {
-    const r = spawnSync('node', [TOOL, '--ipa', ipa, '--manifest', manifest], { encoding: 'utf8' });
-    return { code: r.status, out: `${r.stdout}${r.stderr}` };
+function run(ipa, manifest, { timeout = 120000 } = {}) {
+    // The timeout is not belt-and-braces, it is load-bearing. A malformed
+    // artifact once HUNG this tool, and a test written to catch a hang must not
+    // itself hang: without this, spawnSync blocks forever and the suite stalls
+    // instead of failing. `timedOut` is surfaced so a caller can tell "exited
+    // with the wrong code" from "never exited at all" -- they need different fixes.
+    const r = spawnSync('node', [TOOL, '--ipa', ipa, '--manifest', manifest], { encoding: 'utf8', timeout });
+    return { code: r.status, out: `${r.stdout}${r.stderr}`, timedOut: r.signal === 'SIGTERM' && r.status === null };
 }
 
 const BASE_PLIST = { CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.2.3' };
@@ -1065,4 +1070,161 @@ test('the manifest example in SKILL.md is valid JSON and the tool accepts it', (
     });
     const { code, out } = run(ipa, manifestFile);
     assert.notEqual(code, 2, `the documented example is not a usable manifest: ${out}`);
+});
+
+// ---------------------------------------------------------------------------
+// Binary plist hardening. A built IPA's Info.plist is binary, so this is the
+// branch every real artifact takes -- and it shipped with no validation at all
+// while the XML branch had a truncation floor. Same bug, more common path.
+//
+// The reproduction that motivated these: truncating tests/fixtures/binary-info.plist
+// to 60% did not produce exit 2, it HUNG the process. A garbage length byte
+// becomes an enormous `len` and the array branch tries to materialise it. A hang
+// defeats the exit-code contract completely -- no 0, no 1, no 2, just a paid
+// macOS runner sitting until its job timeout with nothing to diagnose from.
+// ---------------------------------------------------------------------------
+
+// Minimal bplist00 writer. Only the types these cases need, 1-byte offsets and
+// refs, so the whole file stays under 256 bytes. Hand-built on purpose: the
+// point is to construct object graphs a real encoder would never emit.
+function bplist(objects, topObject = 0) {
+    const header = Buffer.from('bplist00', 'latin1');
+    // A count of 15 or more cannot fit the low nibble and must use bplist's
+    // extended-length form: nibble 0x0f, then an integer object. Getting this
+    // wrong is how the first draft of these fixtures produced a header the
+    // hardened parser correctly rejected -- which is the parser working.
+    const hdr = (base, count) => (count < 15
+        ? Buffer.from([base | count])
+        : Buffer.from([base | 0x0f, 0x10, count]));
+    const bodies = objects.map((o) => {
+        if (o.type === 'ascii') {
+            return Buffer.concat([hdr(0x50, o.value.length), Buffer.from(o.value, 'ascii')]);
+        }
+        if (o.type === 'utf16') {
+            const b = Buffer.alloc(o.value.length * 2);
+            b.write(o.value, 0, 'utf16le');
+            b.swap16(); // bplist stores UTF-16 big-endian
+            return Buffer.concat([hdr(0x60, o.value.length), b]);
+        }
+        if (o.type === 'array') {
+            return Buffer.concat([hdr(0xa0, o.refs.length), Buffer.from(o.refs)]);
+        }
+        if (o.type === 'dict') {
+            return Buffer.concat([hdr(0xd0, o.keys.length), Buffer.from(o.keys), Buffer.from(o.values)]);
+        }
+        throw new Error(`unhandled fixture type ${o.type}`);
+    });
+    const offsets = [];
+    let pos = header.length;
+    for (const b of bodies) { offsets.push(pos); pos += b.length; }
+    const table = Buffer.from(offsets);
+    const trailer = Buffer.alloc(32);
+    trailer[6] = 1;                                   // offsetSize
+    trailer[7] = 1;                                   // objRefSize
+    trailer.writeBigUInt64BE(BigInt(objects.length), 8);
+    trailer.writeBigUInt64BE(BigInt(topObject), 16);
+    trailer.writeBigUInt64BE(BigInt(pos), 24);        // offsetTableStart
+    return Buffer.concat([header, ...bodies, table, trailer]);
+}
+
+test('a TRUNCATED binary plist exits 2 instead of hanging', () => {
+    const good = fs.readFileSync(BINARY_PLIST);
+    const ipa = makeIpa({ rawPlist: Buffer.from(good.subarray(0, Math.floor(good.length * 0.6))) });
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
+    const { code, out, timedOut } = run(ipa, manifest, { timeout: 20000 });
+    // The hang check is the real assertion here, and it has to come from the
+    // spawn itself. Before the fix this process never exited.
+    assert.equal(timedOut, false, 'the tool must terminate on a truncated binary plist, not hang');
+    assert.equal(code, 2, `truncated binary plist must be exit 2 (could not inspect), got ${code}: ${out}`);
+    assert.match(out, /binary plist|bplist00/i);
+});
+
+test('a bplist whose version is not 00 is refused by name rather than guessed at', () => {
+    const bad = Buffer.from(fs.readFileSync(BINARY_PLIST));
+    bad.write('bplistZZ', 0, 'latin1');
+    const ipa = makeIpa({ rawPlist: bad });
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, `unknown bplist version must be exit 2, got ${code}: ${out}`);
+    assert.match(out, /bplist00/, 'the message should name the magic it requires');
+    // It must NOT fall through to the XML branch, whose error would send the
+    // reader looking for missing <plist> tags in a binary file.
+    assert.doesNotMatch(out, /not XML plist content/);
+});
+
+test('a trailer pointing its offset table past EOF is exit 2, not a partial parse', () => {
+    const buf = bplist([{ type: 'dict', keys: [1], values: [2] }, { type: 'ascii', value: 'CFBundleIdentifier' }, { type: 'ascii', value: 'com.fixture.app' }]);
+    // Push offsetTableStart beyond the file.
+    buf.writeBigUInt64BE(BigInt(buf.length + 4096), buf.length - 32 + 24);
+    const ipa = makeIpa({ rawPlist: buf });
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, `offset table past EOF must be exit 2, got ${code}: ${out}`);
+});
+
+test('a cyclic object graph is exit 2 rather than a stack overflow', () => {
+    // obj0 = { "CFBundleIdentifier": obj2 }, obj2 = [obj0]. Walking obj0 reaches
+    // obj0 again, which without the re-entrancy guard recurses until the stack dies.
+    const buf = bplist([
+        { type: 'dict', keys: [1], values: [2] },
+        { type: 'ascii', value: 'CFBundleIdentifier' },
+        { type: 'array', refs: [0] },
+    ]);
+    const ipa = makeIpa({ rawPlist: buf });
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, `cyclic binary plist must be exit 2, got ${code}: ${out}`);
+    assert.match(out, /cyclic|itself/i);
+});
+
+test('a UTF-16 string referenced twice reads the same both times', () => {
+    // swap16() mutates in place. Reading one shared string object through two
+    // dict entries byte-swapped it twice: correct on the first read, silent
+    // mojibake on the second. Object 3 is referenced by BOTH values here.
+    // CFBundleIdentifier is present because the tool treats a plist without it
+    // as a failed parse -- a floor that fired on the first draft of this fixture
+    // and was right to.
+    const buf = bplist([
+        { type: 'dict', keys: [1, 2, 3], values: [4, 5, 5] },
+        { type: 'ascii', value: 'CFBundleIdentifier' },
+        { type: 'ascii', value: 'CFBundleShortVersionString' },
+        { type: 'ascii', value: 'CFBundleVersion' },
+        { type: 'ascii', value: 'com.fixture.app' },
+        { type: 'utf16', value: '1.2.3é' }, // non-ASCII forces the UTF-16 branch
+    ]);
+    const ipa = makeIpa({ rawPlist: buf });
+    const manifest = makeManifest({
+        infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app', CFBundleShortVersionString: '1.2.3é', CFBundleVersion: '1.2.3é' } },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, `both reads of a shared UTF-16 string must match; got ${code}: ${out}`);
+});
+
+test('a file reached through a symlink out of the web root is reported by its bundle path, not ../', () => {
+    // Following the link is CORRECT -- the artifact boundary is the .app, not
+    // the declared web root -- but reporting `../Frameworks/x.js` reads like a
+    // path traversal and undercuts the evidence it appears in.
+    const dir = tmp('ipa');
+    const appDir = path.join(dir, 'Payload', 'App.app');
+    fs.mkdirSync(path.join(appDir, 'public'), { recursive: true });
+    fs.mkdirSync(path.join(appDir, 'Frameworks', 'shared'), { recursive: true });
+    fs.writeFileSync(path.join(appDir, 'Info.plist'), plistXml({ CFBundleIdentifier: 'com.fixture.app' }));
+    fs.writeFileSync(path.join(appDir, 'Frameworks', 'shared', 'cam.js'), 'navigator.mediaDevices.getUserMedia({audio:true})');
+    // RELATIVE on purpose. An absolute target points back at this build machine,
+    // dangles once the IPA is extracted elsewhere, and exits 2 for a reason that
+    // has nothing to do with what is being tested -- the exact trap that nearly
+    // closed a live finding in round 17.
+    fs.symlinkSync(path.join('..', 'Frameworks', 'shared'), path.join(appDir, 'public', 'shared'));
+    const ipa = path.join(dir, 'App.ipa');
+    execFileSync('zip', ['-q', '-r', '-y', ipa, 'Payload'], { cwd: dir });
+
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, `the linked file is inside the .app so it is scanned; got ${code}: ${out}`);
+    assert.match(out, /outside the declared web root/, 'the report should say the file sits outside the web root');
+    assert.match(out, /Frameworks[/\\]shared[/\\]cam\.js/, 'and give its real position in the bundle');
+    assert.doesNotMatch(out, /\.\.[/\\]/, 'no ../ path should appear in a violation');
 });

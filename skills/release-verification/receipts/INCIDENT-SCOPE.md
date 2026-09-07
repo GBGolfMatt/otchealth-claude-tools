@@ -70,8 +70,8 @@ noticed by its author.**
   while the artifact is the fact.** `git show <tag>:...` reads the repository,
   not the IPA that shipped. So the query establishes the SOURCE state of 16
   tags; it does not independently verify 16 shipped bundles, and it cannot,
-  because GitHub expires build artifacts after 14 days and every IPA older than
-  Build 59's is gone. Nobody can re-check them, including me.
+  because `ios-depot.yml` uploads each IPA with `retention-days: 14` and every
+  IPA older than Build 59's is gone. Nobody can re-check them, including me.
 
   This is precisely the reasoning that produced the AWARE false P0 one repo
   over: `www/` contained `getUserMedia` behind visible buttons, the shipped

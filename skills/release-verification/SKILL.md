@@ -241,9 +241,10 @@ artifact check.
 
    The iHEARtest manifest was first validated against Build 58, which it failed
    on all three known defects. That run is **historical and no longer
-   reproducible**: GitHub expires build artifacts after 14 days and Build 58's
-   is gone, so nobody can re-check it, including me. Treat it as a note in the
-   log, not as evidence.
+   reproducible**: `ios-depot.yml` uploads the IPA with `retention-days: 14`,
+   so Build 58's is gone and nobody can re-check it, including me. Treat it as a
+   note in the log, not as evidence. (14 is OUR setting, not a GitHub rule --
+   the platform default is 90 days and is configurable per upload.)
 
    What survives is reproducible and is what you should copy: the counterfactual
    in `tests/artifact-truth.test.mjs`, and the one recorded in

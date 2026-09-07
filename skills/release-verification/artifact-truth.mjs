@@ -30,18 +30,19 @@
 // hand-written list of "this app needs that key", DERIVE the requirement from
 // what the shipped bundle actually contains. If the shipped web layer's TEXT
 // MATCHES a privacy-sensitive API's pattern, the shipped Info.plist must
-// declare it. That single
-// rule catches iHEARtest's crash automatically AND clears AWARE's absent key
+// declare it. That single rule catches iHEARtest's crash automatically AND clears AWARE's absent key
 // rather than leaving it suspicious -- the same rule, opposite verdicts, no
 // per-app special-casing.
 //
 // SCOPE, stated plainly because the rule is easy to over-trust: this is a TEXT
 // SCAN of the shipped web layer. A literal match in a comment, a string, or
-// dead code counts as "reachable", and a dynamically built or heavily minified
+// dead code counts as a MATCH, and a dynamically built or heavily minified
 // reference can be missed. So a violation is a strong signal worth blocking on,
 // while a pass means "no shipped-bundle path matches these patterns", NOT "this
 // app provably cannot reach that API". Native-only reach is invisible here by
-// construction; the plist rules and a real-device run cover that.
+// construction, and nothing in this tool closes that: the plist rules only
+// check the keys a manifest names, and a finite device run samples paths
+// rather than enumerating them. They REDUCE the gap; neither covers it.
 //
 // Usage:
 //   node artifact-truth.mjs --ipa <path/to/App.ipa> --manifest <app.release-truth.json> [--json]
@@ -114,7 +115,11 @@ function extract(ipa) {
 
 // plutil is macOS-only, so convert the binary plist ourselves. Info.plist in a
 // built IPA is almost always binary (bplist00); the XML branch covers the
-// occasional uncompiled one.
+// occasional uncompiled one. The dispatch matches the 6-char "bplist" prefix
+// on purpose while the parser demands the full "bplist00": a file that claims
+// to be a bplist of some other version must reach the binary parser and be
+// REFUSED there by name, not fall through to the XML branch and be rejected
+// with a misleading "not XML plist content".
 function readPlist(file) {
   const buf = fs.readFileSync(file);
   if (buf.slice(0, 6).toString('latin1') === 'bplist') return parseBinaryPlist(buf);
@@ -166,33 +171,93 @@ function readPlist(file) {
 
 // Small binary-plist reader covering the object types an Info.plist uses.
 function parseBinaryPlist(buf) {
+  // A built IPA's Info.plist is binary, so THIS is the branch every real
+  // artifact takes -- and it was the branch with no validation at all. The XML
+  // branch got a truncation floor because a truncated XML plist reads every key
+  // past the cut as absent; the binary branch shipped with nothing equivalent,
+  // which is the same bug in the more common path.
+  //
+  // It was worse than silent-wrong. A TRUNCATED bplist HUNG the process:
+  // a garbage length byte becomes an enormous `len` and `Array.from({length:
+  // len})` tries to materialise it. A hang defeats the exit-code contract
+  // completely -- there is no 0, 1 or 2, just a CI job sitting until its
+  // timeout with no diagnosis, on a paid macOS runner. Reproduced before this
+  // was written by truncating tests/fixtures/binary-info.plist to 60%.
+  //
+  // Contract: anything this cannot parse with confidence THROWS, which the
+  // caller maps to exit 2. It never returns partial data, and it never hangs.
+  if (buf.length < 40 || buf.subarray(0, 8).toString('latin1') !== 'bplist00') {
+    // Exactly `bplist00`, which is what the docs have always claimed. The old
+    // check accepted any `bplist` prefix, so a version this code cannot
+    // actually parse was fed to it and the result trusted.
+    throw new Error('Info.plist does not carry the bplist00 magic, or is shorter than the 32-byte trailer plus 8-byte header it must contain');
+  }
+  const need = (pos, n, what) => {
+    if (!Number.isInteger(pos) || !Number.isInteger(n) || pos < 8 || n < 0 || pos + n > buf.length) {
+      throw new Error(`binary plist is malformed: ${what} would read ${n} byte(s) at offset ${pos}, outside this ${buf.length}-byte file`);
+    }
+    return pos;
+  };
+  const uint = (pos, n) => { let v = 0; for (let b = 0; b < n; b++) v = v * 256 + buf[pos + b]; return v; };
+
   const trailer = buf.subarray(buf.length - 32);
   const offsetSize = trailer[6];
   const objRefSize = trailer[7];
   const numObjects = Number(trailer.readBigUInt64BE(8));
   const topObject = Number(trailer.readBigUInt64BE(16));
   const offsetTableStart = Number(trailer.readBigUInt64BE(24));
+
+  if (offsetSize < 1 || offsetSize > 8 || objRefSize < 1 || objRefSize > 8) {
+    throw new Error(`binary plist trailer declares offsetSize=${offsetSize} objRefSize=${objRefSize}, outside the legal 1..8`);
+  }
+  if (!(numObjects >= 1) || !(topObject < numObjects)) {
+    throw new Error(`binary plist trailer declares numObjects=${numObjects} and topObject=${topObject}, which cannot both hold`);
+  }
+  // Checked BEFORE the table loop, so an absurd numObjects fails here rather
+  // than spinning through billions of iterations first.
+  need(offsetTableStart, numObjects * offsetSize, 'offset table');
+  if (offsetTableStart + numObjects * offsetSize > buf.length - 32) {
+    throw new Error('binary plist offset table runs into its own trailer, so the file is truncated or corrupt');
+  }
+
   const offsets = [];
   for (let i = 0; i < numObjects; i++) {
-    let v = 0;
-    for (let b = 0; b < offsetSize; b++) v = v * 256 + buf[offsetTableStart + i * offsetSize + b];
-    offsets.push(v);
+    const off = uint(offsetTableStart + i * offsetSize, offsetSize);
+    need(off, 1, `object ${i}`);
+    if (off >= buf.length - 32) throw new Error(`binary plist object ${i} starts at ${off}, which is inside the trailer`);
+    offsets.push(off);
   }
   const readRef = (pos) => {
-    let v = 0;
-    for (let b = 0; b < objRefSize; b++) v = v * 256 + buf[pos + b];
-    return v;
+    need(pos, objRefSize, 'object reference');
+    const r = uint(pos, objRefSize);
+    if (r >= numObjects) throw new Error(`binary plist holds a reference to object ${r}, but the trailer declares only ${numObjects}`);
+    return r;
   };
   function readLen(pos, low) {
     if (low !== 0x0f) return { len: low, next: pos };
+    need(pos, 1, 'extended length marker');
     const t = buf[pos];
+    if ((t >> 4) !== 0x1) throw new Error('binary plist extended length is not an integer marker, so the object header is corrupt');
     const n = 1 << (t & 0x0f);
-    let v = 0;
-    for (let b = 0; b < n; b++) v = v * 256 + buf[pos + 1 + b];
-    return { len: v, next: pos + 1 + n };
+    if (n > 8) throw new Error(`binary plist extended length claims ${n} bytes, more than the 8 an integer can occupy`);
+    need(pos + 1, n, 'extended length');
+    return { len: uint(pos + 1, n), next: pos + 1 + n };
   }
-  function obj(index) {
+
+  // An offset table can describe a cycle (A refers to B refers to A). Without
+  // this the walk recurses until the stack dies, which is a crash rather than
+  // the exit 2 the contract promises. Only re-entrancy is rejected: an object
+  // legitimately referenced from two places is still read twice.
+  const active = new Set();
+  function obj(index, depth = 0) {
+    if (depth > 64) throw new Error('binary plist nests deeper than 64 levels, which no Info.plist does');
+    if (active.has(index)) throw new Error(`binary plist object ${index} is reachable from itself, so the object graph is cyclic`);
+    active.add(index);
+    try { return readObj(index, depth); } finally { active.delete(index); }
+  }
+  function readObj(index, depth) {
     const pos = offsets[index];
+    need(pos, 1, `object ${index} marker`);
     const marker = buf[pos];
     const high = marker >> 4;
     const low = marker & 0x0f;
@@ -200,22 +265,37 @@ function parseBinaryPlist(buf) {
     if (marker === 0x09) return true;
     if (high === 0x1) {
       const n = 1 << low;
-      let v = 0;
-      for (let b = 0; b < n; b++) v = v * 256 + buf[pos + 1 + b];
-      return v;
+      if (n > 8) throw new Error(`binary plist integer claims ${n} bytes, more than 8`);
+      need(pos + 1, n, 'integer');
+      return uint(pos + 1, n);
     }
-    if (high === 0x5) { const { len, next } = readLen(pos + 1, low); return buf.subarray(next, next + len).toString('ascii'); }
-    if (high === 0x6) { const { len, next } = readLen(pos + 1, low); return buf.subarray(next, next + len * 2).swap16().toString('utf16le'); }
+    if (high === 0x5) {
+      const { len, next } = readLen(pos + 1, low);
+      need(next, len, 'ascii string');
+      return buf.subarray(next, next + len).toString('ascii');
+    }
+    if (high === 0x6) {
+      const { len, next } = readLen(pos + 1, low);
+      need(next, len * 2, 'utf16 string');
+      // COPY before swapping. `swap16()` mutates in place, and a string object
+      // referenced from two places would be swapped twice -- correct on the
+      // first read and silently mojibake on the second.
+      return Buffer.from(buf.subarray(next, next + len * 2)).swap16().toString('utf16le');
+    }
     if (high === 0xa) {
       const { len, next } = readLen(pos + 1, low);
-      return Array.from({ length: len }, (_, i) => obj(readRef(next + i * objRefSize)));
+      need(next, len * objRefSize, 'array');
+      const out = new Array(len);
+      for (let i = 0; i < len; i++) out[i] = obj(readRef(next + i * objRefSize), depth + 1);
+      return out;
     }
     if (high === 0xd) {
       const { len, next } = readLen(pos + 1, low);
+      need(next, len * objRefSize * 2, 'dictionary');
       const out = {};
       for (let i = 0; i < len; i++) {
-        const k = obj(readRef(next + i * objRefSize));
-        const v = obj(readRef(next + len * objRefSize + i * objRefSize));
+        const k = obj(readRef(next + i * objRefSize), depth + 1);
+        const v = obj(readRef(next + len * objRefSize + i * objRefSize), depth + 1);
         out[k] = v;
       }
       return out;
@@ -289,6 +369,18 @@ function readShippedText(appDir, subdir) {
   // paths -- which double-counts the "N text files" line and prints the same
   // file twice in a violation's evidence list. One file, one entry.
   const seen = new Set();
+  // A directory symlink inside the web root may legitimately point elsewhere in
+  // the .app, and following it is correct: the artifact boundary is the bundle,
+  // not the declared web root. But the walk then recurses into the RESOLVED
+  // directory, so a plain root-relative path comes out as `../Frameworks/x.js`
+  // -- which reads like a path traversal in a violation message and undercuts
+  // the evidence. Report anything landing outside the web root by its real
+  // position in the bundle, and say so.
+  const relOf = (abs) => {
+    const r = path.relative(root, abs);
+    if (r !== '..' && !r.startsWith('..' + path.sep)) return r;
+    return `(outside the declared web root) ${path.relative(realBase, abs)}`;
+  };
   (function walk(dir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, e.name);
@@ -311,7 +403,7 @@ function readShippedText(appDir, subdir) {
       } else if (TEXT.has(path.extname(e.name).toLowerCase())) {
         if (seen.has(target)) continue;
         seen.add(target);
-        files.push({ rel: path.relative(root, abs), text: fs.readFileSync(target, 'utf8') });
+        files.push({ rel: relOf(abs), text: fs.readFileSync(target, 'utf8') });
       }
     }
   })(root);

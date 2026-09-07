@@ -184,8 +184,9 @@ list.
 
 Proven both directions before adoption, with the evidence graded honestly. The
 Build 58 run that caught all three known defects is **historical and not
-reproducible** — GitHub expires build artifacts after 14 days and that one is
-gone. The reproducible proofs are the committed test suite, the recorded runs
+reproducible** — `ios-depot.yml` uploads the IPA with `retention-days: 14`, so
+that one is gone. (14 is that workflow's setting, not a GitHub rule; the
+platform default is 90 days.) The reproducible proofs are the committed test suite, the recorded runs
 against Build 59 and both AWARE builds (clean, with the absent microphone key
 cleared rather than merely unflagged), and a counterfactual built from the real
 Build 59 bundle with only the photo key removed, which reports exactly the
