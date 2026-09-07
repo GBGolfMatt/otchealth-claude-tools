@@ -82,8 +82,27 @@ function extract(ipa) {
   }
   const payload = path.join(dir, 'Payload');
   if (!fs.existsSync(payload)) throw new Error(`no Payload/ inside ${ipa} -- not an iOS app archive?`);
-  const app = fs.readdirSync(payload).find((n) => n.endsWith('.app'));
-  if (!app) throw new Error(`no .app bundle inside Payload/ of ${ipa}`);
+  // EXACTLY ONE top-level .app, not the first one readdir happens to return.
+  // This is not a hypothetical layout: an embedded watch app built with
+  // SKIP_INSTALL=NO archives as a SECOND top-level .app -- a misconfiguration
+  // this fleet has actually shipped into (see the Flatstick watch/widget
+  // notes). With `.find()` the tool would parse whichever bundle the directory
+  // listing yielded first, scan its web layer, and print a CLEAN verdict about
+  // the wrong app. Worse, readdir order is not guaranteed, so which bundle got
+  // verified could differ between runs on the same artifact.
+  //
+  // Ambiguity here is exactly the case exit 2 exists for: an artifact we cannot
+  // identify unambiguously has not been verified, whatever the rules say.
+  const apps = fs.readdirSync(payload).filter((n) => n.endsWith('.app'));
+  if (apps.length === 0) throw new Error(`no .app bundle inside Payload/ of ${ipa}`);
+  if (apps.length > 1) {
+    throw new Error(
+      `Payload/ of ${path.basename(ipa)} holds ${apps.length} top-level .app bundles (${apps.join(', ')}), ` +
+      'so there is no single artifact to make claims about. A watch app built with SKIP_INSTALL=NO ' +
+      'produces this. Fix the archive rather than letting the tool guess which one shipped.',
+    );
+  }
+  const app = apps[0];
   const appDir = path.join(payload, app);
 
   // ANCHOR THE BOUNDARY HERE, not downstream. readShippedText treats

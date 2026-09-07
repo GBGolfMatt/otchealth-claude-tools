@@ -1228,3 +1228,28 @@ test('a file reached through a symlink out of the web root is reported by its bu
     assert.match(out, /Frameworks[/\\]shared[/\\]cam\.js/, 'and give its real position in the bundle');
     assert.doesNotMatch(out, /\.\.[/\\]/, 'no ../ path should appear in a violation');
 });
+
+test('two top-level .app bundles is exit 2, not a clean verdict about whichever came first', () => {
+    // NOT hypothetical: an embedded watch app built with SKIP_INSTALL=NO
+    // archives as a second top-level .app, which this fleet has shipped into
+    // before. The old code took `readdirSync(...).find(...)`, so it would parse
+    // whichever bundle the listing yielded first -- order not guaranteed -- and
+    // report exit 0 about the wrong app.
+    const dir = tmp('ipa');
+    const main = path.join(dir, 'Payload', 'App.app');
+    const watch = path.join(dir, 'Payload', 'AppWatch.app');
+    fs.mkdirSync(path.join(main, 'public'), { recursive: true });
+    fs.mkdirSync(watch, { recursive: true });
+    fs.writeFileSync(path.join(main, 'Info.plist'), plistXml({ CFBundleIdentifier: 'com.fixture.app' }));
+    fs.writeFileSync(path.join(watch, 'Info.plist'), plistXml({ CFBundleIdentifier: 'com.fixture.app.watchkitapp' }));
+    fs.writeFileSync(path.join(main, 'public', 'app.js'), 'console.log(1)');
+    const ipa = path.join(dir, 'App.ipa');
+    execFileSync('zip', ['-q', '-r', ipa, 'Payload'], { cwd: dir });
+
+    const manifest = makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, `an ambiguous Payload must be exit 2, got ${code}: ${out}`);
+    assert.match(out, /2 top-level \.app bundles/);
+    assert.match(out, /App\.app/);
+    assert.match(out, /AppWatch\.app/, 'both bundles should be named so the archive can be fixed');
+});
