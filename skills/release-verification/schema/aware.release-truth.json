@@ -1,0 +1,34 @@
+{
+  "app": "aware",
+  "note": "AWARE has TWO web trees and only one ships. The repo's www/ is the legacy/dev tree and contains getUserMedia in modules reachable from visible buttons; the PUBLIC build assembles a different bundle that contains none of it. Reading www/ produced a false P0 on 2026-09-06. These expectations are checked against the SHIPPED IPA only.",
+  "expect": {
+    "infoPlist": {
+      "equals": {
+        "CFBundleIdentifier": "com.innerscope.aware"
+      }
+    },
+    "webBundle": {
+      "root": "public",
+      "mustNotContain": [
+        {
+          "pattern": "getUserMedia",
+          "why": "Release contract section 5 excludes numeric phone-microphone sound-level claims and live microphone-to-speaker simulation. The build enforces this by assembling a bundle without them; this asserts the enforcement actually happened rather than trusting the contract text."
+        }
+      ]
+    },
+    "capabilityCoupling": [
+      {
+        "ifBundleMatches": "getUserMedia|mediaDevices",
+        "requirePlistKey": "NSMicrophoneUsageDescription",
+        "forbidIfUnreachable": true,
+        "why": "Two-way rule. If the shipped bundle's text matches a microphone pattern the key must be declared or iOS kills the app; if nothing matches, declaring the key over-claims a permission the app never uses and invites App Review questions. Stated as a text match, not as reachability, because that is all this tool establishes. The ios-depot workflow asserts this key is ABSENT, and this proves that assertion is correct rather than merely asserted."
+      },
+      {
+        "ifBundleMatches": "navigator\\.share|canShare",
+        "requirePlistKey": "NSPhotoLibraryAddUsageDescription",
+        "why": "Same TCC class found in the source of 16 tagged iHEARtest builds (42 through 58), but narrowed. A bare share call is not evidence of a photo-library write: sharing a PDF offers Save to Files and never touches the library, while sharing a PNG offers Save Image and does. AWARE shares PDFs, so requiring the photo-add key on any navigator.share would be a false positive. Both patterns must hit the SAME file, so a thumbnail helper elsewhere in the bundle cannot combine with an unrelated share call to trip it.",
+        "andBundleMatches": "image/png|image/jpeg|toBlob|toDataURL"
+      }
+    ]
+  }
+}

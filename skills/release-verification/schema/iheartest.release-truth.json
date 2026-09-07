@@ -1,0 +1,46 @@
+{
+  "app": "iheartest",
+  "note": "Expectations checked against the SHIPPED IPA, never the repo tree. See SKILL.md for why that distinction is the whole point of this file.",
+  "expect": {
+    "infoPlist": {
+      "equals": {
+        "CFBundleIdentifier": "com.innerscope.iheartest"
+      },
+      "forbidden": [
+        {
+          "key": "NSPhotoLibraryUsageDescription",
+          "why": "Add-only is the correct scope. The app never reads or picks from the photo library, and over-declaring a read permission invites App Review questions and misleads the user."
+        }
+      ]
+    },
+    "webBundle": {
+      "root": "public",
+      "mustContain": [
+        {
+          "pattern": "cioConsentGranted",
+          "why": "The Customer.io relay must ship behind its fail-closed consent gate. Build 58 shipped the relay WITHOUT this and sent install telemetry while Settings said Off."
+        }
+      ],
+      "mustNotContain": []
+    },
+    "capabilityCoupling": [
+      {
+        "ifBundleMatches": "navigator\\.share|canShare",
+        "requirePlistKey": "NSPhotoLibraryAddUsageDescription",
+        "why": "The share card builds a PNG and hands it to the iOS share sheet; the user choosing Save Image writes to the photo library on the app's behalf, and without this key iOS terminates the process under TCC (bug_type 309). It went undetected across 16 tagged builds (42, 43, 45 through 58), every one in the repo history until 59; the count is enumerated from the tags by a source query, so it is a source-level blast radius rather than 16 verified artifacts (those IPAs have expired). Apple's binary scanner cannot catch it because the app links no PhotoKit. NARROWED to require an image indicator in the SAME file as the share call, because a bare share does not imply a library write (a PDF share offers Save to Files instead). Verified against the shipped Build 59 IPA: js/app.js matches both patterns and js/native.js matches only the share half, so the narrowed rule still matches the code that caused the crash.",
+        "andBundleMatches": "image/png|image/jpeg|toBlob|toDataURL"
+      },
+      {
+        "ifBundleMatches": "getUserMedia|mediaDevices",
+        "requirePlistKey": "NSMicrophoneUsageDescription",
+        "forbidIfUnreachable": false,
+        "why": "Any reachable microphone path must be declared or iOS kills the app under TCC."
+      }
+    ],
+    "renderedVersion": {
+      "file": "index.html",
+      "elementId": "app-version-tag",
+      "why": "Packet item 14. Also the release string every error report is grouped under."
+    }
+  }
+}
