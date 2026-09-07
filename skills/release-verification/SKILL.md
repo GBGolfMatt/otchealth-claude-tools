@@ -25,11 +25,25 @@ repo answers a question nobody asked. Two incidents in one week made this
 concrete, and they point in **opposite** directions, which is what makes the
 lesson trustworthy rather than a rule of thumb:
 
-- **iHEARtest, 16 tagged builds by source.** Reading the repo would not have flagged
-  anything. The shipped app hands a PNG to the iOS share sheet; a user
-  choosing *Save Image* causes a write to the photo library on the app's
-  behalf. `Info.plist` declared no `NSPhotoLibraryAddUsageDescription`, so iOS
-  killed the process under TCC.
+- **iHEARtest, 16 tagged builds by source.** The shipped app hands a PNG to the
+  iOS share sheet; a user choosing *Save Image* causes a write to the photo
+  library on the app's behalf. `Info.plist` declared no
+  `NSPhotoLibraryAddUsageDescription`, so iOS killed the process under TCC.
+
+  Nothing flagged it for 16 builds, and the reason is worth stating precisely,
+  because an earlier draft of this line got it wrong. It said "reading the repo
+  would not have flagged anything" — which contradicts the paragraph directly
+  below, where the blast radius is counted by running `git show` against the
+  repo. The evidence *was* in source. What was missing was anything that knew to
+  correlate two facts sitting in different files: that the bundle reaches the
+  share sheet, and that the plist declares no photo-library key. Neither file is
+  suspicious alone. No reviewer reads them as a pair.
+
+  Two things then keep the check honest at the artifact rather than in the repo.
+  Xcode merges and injects `Info.plist` values at build time, so the source
+  plist is a claim about the shipped one and not the shipped one itself. And
+  which code actually ships varies by build configuration, which is exactly what
+  the AWARE case below turns on.
 
   The count is derived, not recalled: **16 tagged builds carry the defect in
   source** — 42, 43, and 45 through 58, which is every tagged build the repo has
@@ -305,12 +319,27 @@ asserting the pair. `iheartest/qa/release-verification/` is the worked example.
   and required to stay inside the real app directory; anything else is exit 2.
   A symlink pointing back inside is legitimate and is followed, deduped by
   resolved identity so one file is not counted twice.
-- **The XML plist reader is a structural floor, not a validating parser.** It
-  requires the bplist magic, or an XML document that opens `<plist>`/`<dict>`,
-  *closes* `</plist>`, and has balanced `<dict>` and `<key>` tags — then reads
-  key/value pairs with a regex. That catches truncation and gross mangling,
-  which is the corruption that actually happens to a file on the way out of a
-  build. It would not catch every semantically invalid document. Anything it
-  rejects is exit 2, never a pass and never a violation: a plist the tool could
-  only partially read is not evidence about the keys it appears to lack, and an
-  earlier version turned exactly that into a confident fabricated finding.
+- **The plist readers refuse rather than guess, in both directions.** Binary
+  (`bplist00`) and XML are each parsed structurally, and anything either cannot
+  represent faithfully is exit 2 — never a pass, never a violation. A plist the
+  tool could only partially read is not evidence about the keys it appears to
+  lack, and an earlier version turned exactly that into a confident fabricated
+  finding.
+
+  The XML side is strict in ways a validating parser is not: an unknown element
+  or a key declared twice in the same dict is refused, because `plutil` resolves
+  a duplicate last-wins and which value iOS honours is not something worth
+  asserting on a coin flip. That asymmetry is deliberate. A false exit 2 stops a
+  build with a message naming the file and the construct, and a human fixes it
+  in a minute. A false verdict ships.
+
+  Both readers replaced something worse, and the XML one is the sharper lesson.
+  It used to be a single global regex over `<key>`/`<string>` pairs. A regex
+  that extracts pairs implicitly *flattens* the tree, and flattening is
+  last-wins — so a key nested inside an `<array>` or a child `<dict>` silently
+  overwrote the root key of the same name. Real `Info.plist` files nest
+  constantly. The failure that matters is not the wrong version string: a
+  `NSMicrophoneUsageDescription` nested where iOS never reads it satisfied the
+  coupling rule, and the tool printed **VERDICT: CLEAN** over a build that would
+  crash under TCC on a real device — inside the check written to catch that
+  exact crash.

@@ -147,50 +147,226 @@ function extract(ipa) {
 function readPlist(file) {
   const buf = fs.readFileSync(file);
   if (buf.slice(0, 6).toString('latin1') === 'bplist') return parseBinaryPlist(buf);
-  const text = buf.toString('utf8');
-  // Refuse input that is not a plist at all. The reader below is a regex over
-  // key/value pairs, so ANY text containing a matching
-  // <key>..</key><string>..</string> fragment would otherwise be accepted as a
-  // parsed plist.
-  const openAt = text.search(/<plist[\s>]/i);
-  if (openAt < 0 || !/<dict[\s>]/i.test(text)) {
-    throw new Error('Info.plist is not XML plist content (no <plist> / <dict> element) and does not start with the bplist00 magic');
+  return parseXmlPlist(buf.toString('utf8'));
+}
+
+// XML plist reader.
+//
+// What it replaced, and why that mattered: the old reader was ONE global regex
+// over `<key>..</key><string>..</string>` pairs, run across the whole document.
+// A regex that "extracts pairs" implicitly FLATTENS the tree, and flattening is
+// last-wins -- so a key nested inside an <array> or a child <dict> silently
+// OVERWROTE the root key of the same name. Real Info.plists nest constantly
+// (CFBundleURLTypes is an array of dicts, NSAppTransportSecurity and
+// UIApplicationSceneManifest are dicts), so this was not a hypothetical shape.
+// Reproduced before this was written: a root CFBundleIdentifier of
+// `com.real.app` with a nested one of `com.nested.decoy` parsed as the decoy.
+//
+// That is the worst failure mode this tool has. Not "I could not read it" --
+// exit 2 covers that honestly -- but a CONFIDENT VERDICT about a value the OS
+// never sees, printed in the tool's most quotable voice. The binary branch has
+// always parsed structurally and so never had this bug, which meant the two
+// branches could disagree about the same logical file.
+//
+// So this is a small recursive-descent reader over the plist DTD's value
+// elements. It is deliberately intolerant: anything it cannot represent
+// faithfully THROWS, which the caller maps to exit 2. It never guesses, never
+// returns partial data, and never flattens.
+//
+// It is not a validating XML parser and does not claim to be one. It rejects
+// documents a real parser would accept (unknown elements, duplicate keys). That
+// asymmetry is deliberate: a false exit 2 stops a build with a message naming
+// the file and the construct, which a human fixes in a minute. A false verdict
+// ships.
+function parseXmlPlist(text) {
+  const fail = (msg) => { throw new Error(`Info.plist ${msg}`); };
+
+  // Strip the XML declaration, the DOCTYPE and comments in ONE pass that knows
+  // about CDATA, rather than three independent regexes. A naive comment strip
+  // would mangle a `<!--` that legitimately sits inside a CDATA section, and a
+  // naive tag-counting heuristic (which is what used to guard this function)
+  // would miscount a `<dict>` written inside a comment. Both are unlikely in a
+  // build-produced Info.plist. "Unlikely" is how the flattening bug above got
+  // in, so handle them.
+  let s = '';
+  for (let j = 0; j < text.length;) {
+    if (text.startsWith('<![CDATA[', j)) {
+      const end = text.indexOf(']]>', j);
+      if (end < 0) fail('has an unterminated <![CDATA[ section, so the document is truncated');
+      s += text.slice(j, end + 3);
+      j = end + 3;
+    } else if (text.startsWith('<!--', j)) {
+      const end = text.indexOf('-->', j);
+      if (end < 0) fail('has an unterminated XML comment, so the document is truncated');
+      j = end + 3;
+    } else if (text.startsWith('<?', j)) {
+      const end = text.indexOf('?>', j);
+      if (end < 0) fail('has an unterminated <? processing instruction, so the document is truncated');
+      j = end + 2;
+    } else if (text.startsWith('<!DOCTYPE', j)) {
+      const end = text.indexOf('>', j);
+      if (end < 0) fail('has an unterminated <!DOCTYPE, so the document is truncated');
+      // An internal subset can contain '>' inside its brackets, so the first
+      // '>' would land mid-declaration and desynchronise everything after it.
+      // No Apple-generated plist has one; refuse rather than mis-skip.
+      if (text.slice(j, end).includes('[')) fail('has a <!DOCTYPE with an internal subset, which this reader does not parse');
+      j = end + 1;
+    } else {
+      s += text[j++];
+    }
   }
-  // The shape check above is NOT sufficient, and an earlier version of this
-  // function said so in a comment and then shipped it anyway. A TRUNCATED plist
-  // -- the realistic corruption for a partially written file or a cut-off
-  // download -- keeps its opening tags and all of its early keys, so it sails
-  // through. Every key after the cut then reads as ABSENT.
-  //
-  // That is not just a missed exit 2. The coupling rules turn those phantom
-  // absences into confident VIOLATIONS: reproduced live, a plist truncated
-  // mid-`<key>NSMicroph` produced "shipped bundle textually matches
-  // /getUserMedia/ but Info.plist does NOT declare NSMicrophoneUsageDescription"
-  // -- a fabricated defect, in the tool's most quotable voice, about a key that
-  // may well exist past the cut. Exit 2 exists so "I could not read it" is never
-  // reported as a pass OR as a finding.
-  //
-  // So require the document to be TERMINATED and its tags BALANCED. This is
-  // still not a validating XML parser and does not claim to be one; it is a
-  // structural floor that catches truncation and gross mangling, which is the
-  // corruption that actually happens to a file on the way out of a build.
-  if (!/<\/plist\s*>/i.test(text.slice(openAt))) {
-    throw new Error('Info.plist has an opening <plist> but no closing </plist>: the document is truncated, so keys past the cut would read as absent and be reported as real violations');
+
+  // Refuse input that is not a plist at all, before any parsing. Without this,
+  // the recursive descent below would report a shape complaint about arbitrary
+  // text, which sends the reader looking for a malformed plist in a file that
+  // is not one.
+  const plistAt = s.search(/<plist[\s>]/i);
+  if (plistAt < 0) {
+    fail('is not XML plist content (no <plist> element) and does not start with the bplist00 magic');
   }
-  const count = (re) => (text.match(re) || []).length;
-  // `<dict/>` self-closes, so [\s>] deliberately does not count it as an opener.
-  const dictOpen = count(/<dict[\s>]/gi), dictClose = count(/<\/dict\s*>/gi);
-  const keyOpen = count(/<key\s*>/gi), keyClose = count(/<\/key\s*>/gi);
-  if (dictOpen !== dictClose || keyOpen !== keyClose) {
-    throw new Error(`Info.plist tags do not balance (<dict> ${dictOpen}/${dictClose}, <key> ${keyOpen}/${keyClose}): the document is malformed, and a partially readable plist is not evidence about the keys it appears to lack`);
+
+  let i = plistAt;
+
+  const skipSpace = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+
+  // Reads one element tag and advances past its '>'.
+  const readTag = () => {
+    skipSpace();
+    if (i >= s.length) fail('ends where an element was expected, so the document is truncated');
+    if (s[i] !== '<') fail(`has character data where an element was expected: ${JSON.stringify(s.slice(i, i + 40))}`);
+    const end = s.indexOf('>', i);
+    if (end < 0) fail('has an unterminated element (a "<" with no ">"), so the document is truncated');
+    const body = s.slice(i + 1, end);
+    i = end + 1;
+    const close = body.startsWith('/');
+    const selfClose = body.endsWith('/');
+    if (close && selfClose) fail(`has the malformed element <${body}>`);
+    const name = (close ? body.slice(1) : body).replace(/\/$/, '').trim().split(/\s/)[0];
+    if (!/^[A-Za-z_][\w.:-]*$/.test(name)) fail(`has the malformed element <${body}>`);
+    return { close, selfClose, name };
+  };
+
+  const expectClose = (name) => {
+    const t = readTag();
+    if (!t.close || t.name !== name) {
+      fail(`expected </${name}> but found <${t.close ? '/' : ''}${t.name}${t.selfClose ? '/' : ''}>: the document is malformed, and a partially readable plist is not evidence about the keys it appears to lack`);
+    }
+  };
+
+  const ENTITY = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  const decode = (raw) => raw.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, e) => {
+    if (Object.prototype.hasOwnProperty.call(ENTITY, e)) return ENTITY[e];
+    if (e[0] !== '#') return m; // unknown named entity: leave it visible rather than inventing a character
+    const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+    return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+  });
+
+  // Character data up to the next element, with CDATA spliced in and entities
+  // decoded. The old reader did not decode entities at all, so a CFBundleName
+  // of `Ear &amp; Eye` compared unequal to `Ear & Eye` and reported drift.
+  const readText = () => {
+    let out = '';
+    for (;;) {
+      if (s.startsWith('<![CDATA[', i)) {
+        const end = s.indexOf(']]>', i);
+        if (end < 0) fail('has an unterminated <![CDATA[ section, so the document is truncated');
+        out += s.slice(i + 9, end);
+        i = end + 3;
+        continue;
+      }
+      const lt = s.indexOf('<', i);
+      if (lt < 0) fail('ends inside an element value, so the document is truncated');
+      out += decode(s.slice(i, lt));
+      i = lt;
+      if (!s.startsWith('<![CDATA[', i)) return out;
+    }
+  };
+
+  const parseValue = (depth) => {
+    // A cycle is impossible in a tree, but a pathological file can still nest
+    // far enough to blow the stack, and a RangeError is not one of the three
+    // outcomes this tool promises.
+    if (depth > 64) fail('nests deeper than 64 levels, which no Info.plist does; refusing rather than recursing');
+    const t = readTag();
+    if (t.close) fail(`has a closing </${t.name}> where a value was expected`);
+    switch (t.name) {
+      case 'string': {
+        if (t.selfClose) return '';
+        const v = readText();
+        expectClose('string');
+        return v;
+      }
+      case 'true':
+      case 'false': {
+        if (!t.selfClose) expectClose(t.name);
+        return t.name === 'true';
+      }
+      case 'integer':
+      case 'real': {
+        if (t.selfClose) fail(`has a self-closing <${t.name}/>, which carries no value`);
+        const raw = readText().trim();
+        expectClose(t.name);
+        const n = Number(raw);
+        if (raw === '' || !Number.isFinite(n)) fail(`has <${t.name}>${raw}</${t.name}>, which is not a number`);
+        return n;
+      }
+      case 'date': {
+        if (t.selfClose) fail('has a self-closing <date/>, which carries no value');
+        const raw = readText().trim();
+        expectClose('date');
+        return raw;
+      }
+      case 'data': {
+        if (t.selfClose) return Buffer.alloc(0);
+        const raw = readText();
+        expectClose('data');
+        return Buffer.from(raw.replace(/\s+/g, ''), 'base64');
+      }
+      case 'array': {
+        const arr = [];
+        if (t.selfClose) return arr;
+        for (;;) {
+          skipSpace();
+          if (s.startsWith('</', i)) { expectClose('array'); return arr; }
+          arr.push(parseValue(depth + 1));
+        }
+      }
+      case 'dict': {
+        const obj = {};
+        if (t.selfClose) return obj;
+        for (;;) {
+          skipSpace();
+          if (s.startsWith('</', i)) { expectClose('dict'); return obj; }
+          const kt = readTag();
+          if (kt.close || kt.name !== 'key') {
+            fail(`has <${kt.close ? '/' : ''}${kt.name}> inside a <dict> where a <key> was expected: every dict entry is a key followed by its value`);
+          }
+          let key = '';
+          if (!kt.selfClose) { key = readText(); expectClose('key'); }
+          if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            // plutil resolves this last-wins, but a build-produced plist with a
+            // duplicated key is a mangled file, and which value the OS actually
+            // honours is not something this tool will assert on a coin flip.
+            fail(`declares the key ${JSON.stringify(key)} twice in the same dict`);
+          }
+          obj[key] = parseValue(depth + 1);
+        }
+      }
+      default:
+        fail(`contains the element <${t.name}>, which this reader cannot represent; refusing rather than reporting a verdict about a file it only partly understands`);
+    }
+    return undefined; // unreachable: fail() always throws
+  };
+
+  const open = readTag();
+  if (open.close || open.name !== 'plist') fail('does not open with a <plist> element');
+  if (open.selfClose) fail('has an empty <plist/> element and so declares no keys at all');
+  const root = parseValue(0);
+  expectClose('plist');
+  if (root === null || typeof root !== 'object' || Array.isArray(root) || Buffer.isBuffer(root)) {
+    fail('has a root element that is not a <dict>, so it has no keys to check');
   }
-  const out = {};
-  // Minimal XML plist reader: enough for <key>/<string>/<true>/<false>, which
-  // is all these expectations ever assert against.
-  const re = /<key>([^<]+)<\/key>\s*(?:<string>([\s\S]*?)<\/string>|<(true|false)\s*\/>)/g;
-  let m;
-  while ((m = re.exec(text))) out[m[1]] = m[2] !== undefined ? m[2] : m[3] === 'true';
-  return out;
+  return root;
 }
 
 // Small binary-plist reader covering the object types an Info.plist uses.
@@ -396,7 +572,8 @@ function readShippedText(appDir, subdir) {
   validateWebRootString(subdir, appDir);
   const root = subdir ? path.join(appDir, subdir) : appDir;
   const files = [];
-  if (!fs.existsSync(root)) return { root, files, missing: true };
+  const notes = [];
+  if (!fs.existsSync(root)) return { root, files, notes, missing: true };
 
   // The real-path floor. Everything below this line may only read bytes that
   // live inside the extracted .app on disk, symlinks resolved.
@@ -413,18 +590,26 @@ function readShippedText(appDir, subdir) {
   // paths -- which double-counts the "N text files" line and prints the same
   // file twice in a violation's evidence list. One file, one entry.
   const seen = new Set();
-  // A directory symlink inside the web root may legitimately point elsewhere in
-  // the .app, and following it is correct: the artifact boundary is the bundle,
-  // not the declared web root. But the walk then recurses into the RESOLVED
-  // directory, so a plain root-relative path comes out as `../Frameworks/x.js`
-  // -- which reads like a path traversal in a violation message and undercuts
-  // the evidence. Report anything landing outside the web root by its real
-  // position in the bundle, and say so.
-  const relOf = (abs) => {
-    const r = path.relative(root, abs);
-    if (r !== '..' && !r.startsWith('..' + path.sep)) return r;
-    return `(outside the declared web root) ${path.relative(realBase, abs)}`;
-  };
+  // THREE TIERS, not two. Round 22 got this wrong and the error is worth keeping
+  // written down: it followed an in-.app symlink out of the web root and merely
+  // RELABELLED the resulting `../Frameworks/x.js` path, treating a scope problem
+  // as a presentation problem. The reasoning was "the artifact boundary is the
+  // bundle, not the declared web root" -- true for SECURITY and wrong for SCOPE.
+  //
+  // webBundle.root is a SEMANTIC boundary, and this file's own SKILL.md says so:
+  // without a root "the scan would walk the whole .app ... an .app carries
+  // localization strings, resource JSON and framework text, so a capability rule
+  // could match a file the web layer never contains." A `public/` symlink to
+  // `Frameworks/` recreates exactly that false-positive class -- a capability
+  // finding raised from bytes the web layer never contained.
+  //
+  //   inside the web root        -> scan it
+  //   inside the .app, outside   -> SKIP, and say so in a note. Not a security
+  //   the root                      breach, just not the payload these rules
+  //                                 make claims about. Skipping is correct
+  //                                 rather than a miss, but it must be visible.
+  //   outside the .app           -> exit 2. Foreign bytes, full stop.
+  const insideRoot = (p) => p === realRoot || p.startsWith(realRoot + path.sep);
   (function walk(dir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, e.name);
@@ -438,6 +623,10 @@ function readShippedText(appDir, subdir) {
         if (!inside(target)) {
           throw new Error(`${path.relative(realBase, abs)} is a symlink to ${target}, outside the shipped .app; a verdict must not be informed by bytes the artifact does not contain`);
         }
+        if (!insideRoot(target)) {
+          notes.push(`skipped ${path.relative(root, abs)}: it is a symlink to ${path.relative(realBase, target)}, which is inside the .app but outside the declared web root, so it is not part of the payload these rules describe`);
+          continue;
+        }
       }
       const st = fs.statSync(target);
       if (st.isDirectory()) {
@@ -447,11 +636,11 @@ function readShippedText(appDir, subdir) {
       } else if (TEXT.has(path.extname(e.name).toLowerCase())) {
         if (seen.has(target)) continue;
         seen.add(target);
-        files.push({ rel: relOf(abs), text: fs.readFileSync(target, 'utf8') });
+        files.push({ rel: path.relative(root, abs), text: fs.readFileSync(target, 'utf8') });
       }
     }
   })(root);
-  return { root, files, missing: false };
+  return { root, files, notes, missing: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +833,9 @@ const bundle = inspect('reading the shipped web bundle', () => {
   if (b.missing) {
     throw new Error(`webBundle.root "${wantedRoot}" does not exist inside the shipped .app (is it "public"?)`);
   }
+  // Anything the walk declined to scope in must be SAID. A skip that nobody
+  // sees is the same shape as a check that silently did nothing.
+  for (const n of b.notes || []) notes.push(n);
   // Zero scanned files is fatal whenever ANY rule reads the bundle, whether or
   // not a root was named.
   //

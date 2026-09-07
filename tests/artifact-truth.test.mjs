@@ -758,7 +758,7 @@ test('a truncated plist NEVER fabricates a violation about a key past the cut', 
     assert.doesNotMatch(out, /does NOT declare/, 'reported a phantom missing key from an unreadable plist');
 });
 
-test('unbalanced tags mid-document exit 2 even when the closing </plist> is present', () => {
+test('a mangled middle exits 2 even when the closing </plist> is present', () => {
     // Truncation is not the only corruption; a mangled middle leaves the
     // document terminated but incoherent.
     //
@@ -767,12 +767,21 @@ test('unbalanced tags mid-document exit 2 even when the closing </plist> is pres
     // tool was right. Keeping the note because "I wrote a bad fixture" and "the
     // guard does not work" produce the identical red, and only one of them is a
     // reason to change the code. This one drops a </key> instead.
+    //
+    // This assertion used to demand the string "do not balance", from the
+    // tag-COUNTING heuristic that guarded the old regex reader. The recursive
+    // reader that replaced it does not count anything -- it reports the exact
+    // position where the document stopped making sense. Asserting the vaguer
+    // message would now pin a diagnosis strictly worse than the one available,
+    // so this asserts the contract (exit 2, and the specific defect named)
+    // rather than the old wording.
     const ipa = makeIpa({
         rawPlist: `${TRUNC_HEAD}\t<key>NSPhotoLibraryAddUsageDescription\n\t<string>x</string>\n</dict>\n</plist>\n`,
     });
     const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
     assert.equal(code, 2, out);
-    assert.match(out, /do not balance/);
+    assert.match(out, /expected <\/key> but found <string>/, 'the message should name where the document stopped parsing');
+    assert.match(out, /malformed/);
 });
 
 test('a realistic nested plist with arrays and a self-closing <dict\/> still parses', () => {
@@ -1207,20 +1216,24 @@ test('a UTF-16 string referenced twice reads the same both times', () => {
     assert.equal(code, 0, `both reads of a shared UTF-16 string must match; got ${code}: ${out}`);
 });
 
-test('a file reached through a symlink out of the web root is reported by its bundle path, not ../', () => {
-    // Following the link is CORRECT -- the artifact boundary is the .app, not
-    // the declared web root -- but reporting `../Frameworks/x.js` reads like a
-    // path traversal and undercuts the evidence it appears in.
+test('a symlink out of the web root is NOT scanned, and the skip is stated', () => {
+    // ROUND 22 GOT THIS WRONG AND THIS TEST ENCODED THE ERROR. It asserted the
+    // linked file WAS scanned and merely relabelled in the output -- treating a
+    // scope problem as a presentation problem. webBundle.root is a SEMANTIC
+    // boundary: SKILL.md says an .app "carries localization strings, resource
+    // JSON and framework text, so a capability rule could match a file the web
+    // layer never contains", which is exactly what following this link does.
+    // Inside the .app is a SECURITY question; inside the web root is a SCOPE
+    // question, and they need different answers.
     const dir = tmp('ipa');
     const appDir = path.join(dir, 'Payload', 'App.app');
     fs.mkdirSync(path.join(appDir, 'public'), { recursive: true });
     fs.mkdirSync(path.join(appDir, 'Frameworks', 'shared'), { recursive: true });
     fs.writeFileSync(path.join(appDir, 'Info.plist'), plistXml({ CFBundleIdentifier: 'com.fixture.app' }));
+    // A real web file, so the scan has genuine content and the skip is the only exclusion.
+    fs.writeFileSync(path.join(appDir, 'public', 'app.js'), 'console.log("web")');
+    // The framework text a capability rule must NOT be allowed to match.
     fs.writeFileSync(path.join(appDir, 'Frameworks', 'shared', 'cam.js'), 'navigator.mediaDevices.getUserMedia({audio:true})');
-    // RELATIVE on purpose. An absolute target points back at this build machine,
-    // dangles once the IPA is extracted elsewhere, and exits 2 for a reason that
-    // has nothing to do with what is being tested -- the exact trap that nearly
-    // closed a live finding in round 17.
     fs.symlinkSync(path.join('..', 'Frameworks', 'shared'), path.join(appDir, 'public', 'shared'));
     const ipa = path.join(dir, 'App.ipa');
     execFileSync('zip', ['-q', '-r', '-y', ipa, 'Payload'], { cwd: dir });
@@ -1230,11 +1243,37 @@ test('a file reached through a symlink out of the web root is reported by its bu
         capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
     });
     const { code, out } = run(ipa, manifest);
-    assert.equal(code, 1, `the linked file is inside the .app so it is scanned; got ${code}: ${out}`);
-    assert.match(out, /outside the declared web root/, 'the report should say the file sits outside the web root');
-    assert.match(out, /Frameworks[/\\]shared[/\\]cam\.js/, 'and give its real position in the bundle');
-    assert.doesNotMatch(out, /\.\.[/\\]/, 'no ../ path should appear in a violation');
+    // No microphone key is declared, and no IN-SCOPE file matches, so this is
+    // correctly CLEAN. Before the fix it was a violation raised from framework
+    // bytes -- the false positive webBundle.root exists to prevent.
+    assert.equal(code, 0, `out-of-scope bytes must not raise a finding; got ${code}: ${out}`);
+    assert.match(out, /skipped/, 'the skip must be stated, not silent');
+    assert.match(out, /outside the declared web root/);
+    assert.doesNotMatch(out, /FAIL/, 'no violation may come from outside the web root');
 });
+
+test('a web root whose only content is an out-of-scope symlink is exit 2, not a clean pass', () => {
+    // The scope skip must not become a route to a vacuous pass: if skipping
+    // leaves nothing scanned, the zero-files guard has to fire. Verifying
+    // nothing and finding nothing print the same way otherwise.
+    const dir = tmp('ipa');
+    const appDir = path.join(dir, 'Payload', 'App.app');
+    fs.mkdirSync(path.join(appDir, 'public'), { recursive: true });
+    fs.mkdirSync(path.join(appDir, 'Frameworks', 'shared'), { recursive: true });
+    fs.writeFileSync(path.join(appDir, 'Info.plist'), plistXml({ CFBundleIdentifier: 'com.fixture.app' }));
+    fs.writeFileSync(path.join(appDir, 'Frameworks', 'shared', 'cam.js'), 'navigator.mediaDevices.getUserMedia({})');
+    fs.symlinkSync(path.join('..', 'Frameworks', 'shared'), path.join(appDir, 'public', 'shared'));
+    const ipa = path.join(dir, 'App.ipa');
+    execFileSync('zip', ['-q', '-r', '-y', ipa, 'Payload'], { cwd: dir });
+
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 2, `scanning nothing must be exit 2, got ${code}: ${out}`);
+});
+
 
 test('two top-level .app bundles is exit 2, not a clean verdict about whichever came first', () => {
     // NOT hypothetical: an embedded watch app built with SKIP_INSTALL=NO
@@ -1312,4 +1351,149 @@ test('SKILL.md documents the exit code the tool actually returns for the omitted
     for (const c of ['`0`', '`1`', '`2`', '`3`']) {
         assert.ok(skill.includes(c), `the exit table is missing a row for ${c}`);
     }
+});
+
+// --- the XML reader must not FLATTEN the document ---------------------------
+// The reader these replace was one global regex over <key>/<string> pairs run
+// across the whole file. A regex that "extracts pairs" implicitly flattens the
+// tree, and flattening is last-wins, so a key nested inside an <array> or a
+// child <dict> overwrote the root key of the same name. Real Info.plists nest
+// constantly, so this was not a hypothetical shape.
+//
+// Both of these were reproduced against the old reader before the recursive
+// one was written. The second is the one that matters: a false CLEAN on the
+// exact rule that exists to catch a shipped TCC crash.
+
+const NESTED_HEAD = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">', '<dict>',
+].join('\n');
+
+test('a key nested inside an array does not overwrite the root key of the same name', () => {
+    const ipa = makeIpa({
+        rawPlist: [
+            NESTED_HEAD,
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+            '\t<key>CFBundleURLTypes</key><array><dict>',
+            '\t\t<key>CFBundleIdentifier</key><string>com.nested.decoy</string>',
+            '\t</dict></array>',
+            '</dict>', '</plist>', '',
+        ].join('\n'),
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    // Old reader: parsed CFBundleIdentifier as "com.nested.decoy" and reported
+    // identity drift against an app whose identity was correct. A fabricated
+    // violation, in the tool's most quotable voice, about a value the OS reads
+    // correctly.
+    assert.equal(code, 0, out);
+    assert.doesNotMatch(out, /com\.nested\.decoy/, 'a nested value must never be reported as the root value');
+});
+
+test('a usage-description key nested in an array does NOT satisfy a root-level coupling rule', () => {
+    // The dangerous direction. The coupling rule exists because a bundle that
+    // calls getUserMedia without a ROOT NSMicrophoneUsageDescription crashes on
+    // first use. A nested occurrence is invisible to iOS -- TCC reads the root
+    // dict -- but the flattening reader saw the key, called the rule satisfied,
+    // and printed CLEAN over a build that would crash on a real device.
+    const ipa = makeIpa({
+        rawPlist: [
+            NESTED_HEAD,
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+            '\t<key>UIApplicationSceneManifest</key><dict>',
+            '\t\t<key>NSMicrophoneUsageDescription</key><string>Not where iOS looks.</string>',
+            '\t</dict>',
+            '</dict>', '</plist>', '',
+        ].join('\n'),
+        web: { 'js/mic.js': 'navigator.mediaDevices.getUserMedia({ audio: true })' },
+    });
+    const manifest = makeManifest({
+        webBundle: { root: 'public' },
+        capabilityCoupling: [{ ifBundleMatches: 'getUserMedia', requirePlistKey: 'NSMicrophoneUsageDescription' }],
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 1, `a key only present in a nested dict must still count as undeclared; got ${code}: ${out}`);
+    assert.match(out, /does NOT declare NSMicrophoneUsageDescription/);
+});
+
+test('XML entities in a string are decoded before comparison', () => {
+    // The old reader did no entity decoding at all, so a display name written
+    // (correctly) as `Ear &amp; Eye` compared unequal to `Ear & Eye` and was
+    // reported as drift between what was built and what was claimed.
+    const ipa = makeIpa({
+        rawPlist: [
+            NESTED_HEAD,
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+            '\t<key>CFBundleDisplayName</key><string>Ear &amp; Eye &#8212; 5&lt;6</string>',
+            '</dict>', '</plist>', '',
+        ].join('\n'),
+    });
+    const manifest = makeManifest({
+        infoPlist: { equals: { CFBundleDisplayName: 'Ear & Eye — 5<6' } },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
+});
+
+test('a key declared twice in the same dict is exit 2, not a coin flip', () => {
+    // plutil resolves this last-wins. A build-produced plist with a duplicated
+    // key is a mangled file, and which value iOS honours is not something this
+    // tool will assert on a guess -- especially since the two values here would
+    // produce OPPOSITE verdicts.
+    const ipa = makeIpa({
+        rawPlist: [
+            NESTED_HEAD,
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.other</string>',
+            '</dict>', '</plist>', '',
+        ].join('\n'),
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /twice in the same dict/);
+});
+
+test('an element the reader cannot represent is exit 2, not a partial parse', () => {
+    const ipa = makeIpa({
+        rawPlist: [
+            NESTED_HEAD,
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+            '\t<key>SomethingNew</key><ordereddict><key>a</key><string>b</string></ordereddict>',
+            '</dict>', '</plist>', '',
+        ].join('\n'),
+    });
+    const { code, out } = run(ipa, makeManifest({ infoPlist: { equals: { CFBundleIdentifier: 'com.fixture.app' } } }));
+    assert.equal(code, 2, out);
+    assert.match(out, /cannot represent/);
+});
+
+test('integers, dates, data and comments in a real-shaped plist all parse', () => {
+    // The false-positive guard for every refusal above. A reader strict enough
+    // to reject an unknown element must still accept the element types Xcode
+    // actually emits, or it fails every real artifact -- a worse failure than
+    // the one being fixed.
+    const ipa = makeIpa({
+        rawPlist: [
+            NESTED_HEAD,
+            '\t<!-- a comment, which Xcode does emit in hand-edited plists -->',
+            '\t<key>CFBundleIdentifier</key><string>com.fixture.app</string>',
+            '\t<key>UIRequiredDeviceCapabilities</key><array><string>armv7</string></array>',
+            '\t<key>MinimumOSVersion</key><string>15.0</string>',
+            '\t<key>CFBundleNumericThing</key><integer>42</integer>',
+            '\t<key>CFBundleRealThing</key><real>1.5</real>',
+            '\t<key>BuildMachineOSBuild</key><date>2026-09-07T00:00:00Z</date>',
+            '\t<key>SomeBlob</key><data>aGVsbG8=</data>',
+            '\t<key>EmptyString</key><string/>',
+            '\t<key>ITSAppUsesNonExemptEncryption</key><false/>',
+            '</dict>', '</plist>', '',
+        ].join('\n'),
+    });
+    const manifest = makeManifest({
+        infoPlist: {
+            equals: { CFBundleIdentifier: 'com.fixture.app', CFBundleNumericThing: 42, EmptyString: '' },
+            required: [{ key: 'SomeBlob', why: 'presence of a non-string type must still register' }],
+        },
+    });
+    const { code, out } = run(ipa, manifest);
+    assert.equal(code, 0, out);
 });
