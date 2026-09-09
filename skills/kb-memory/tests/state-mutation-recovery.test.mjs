@@ -147,6 +147,46 @@ test("a state document for another agent is rejected before any write", async ()
   assert.equal(remote.state.goal, "");
 });
 
+test("the immutable receipt is persisted before a conditional write", async () => {
+  const remote = store();
+  let persisted = null;
+  let writes = 0;
+  const result = await commitStateMutation({
+    agent: "cto", operationId: "state-prewrite-receipt-001", mutation: setGoal("durable receipt"),
+    read: remote.read,
+    onReceipt: async (receipt, lifecycle) => {
+      assert.deepEqual(lifecycle, { phase: "prepared" });
+      persisted = structuredClone(receipt);
+    },
+    write: async (...args) => {
+      writes += 1;
+      assert.ok(persisted, "write must not begin before receipt persistence");
+      return remote.write(...args);
+    },
+  });
+  assert.equal(writes, 1);
+  assert.deepEqual(result.receipt, persisted);
+});
+
+test("a failing or timed-out receipt persistence callback prevents every write", async () => {
+  for (const onReceipt of [
+    async () => { throw new Error("synthetic receipt persistence failure"); },
+    async () => new Promise(() => {}),
+  ]) {
+    const remote = store();
+    let writes = 0;
+    await assert.rejects(
+      commitStateMutation({
+        agent: "cto", operationId: "state-receipt-failure-001", mutation: setGoal("must not write"),
+        read: remote.read, write: async (...args) => { writes += 1; return remote.write(...args); }, onReceipt, deadlineMs: 10,
+      }),
+      /receipt persistence failure|deadline exceeded/,
+    );
+    assert.equal(writes, 0);
+    assert.equal(remote.state.goal, "");
+  }
+});
+
 test("conditional conflicts preserve disjoint fields and retain immutable receipts", async () => {
   const remote = store();
   let firstRead = true;

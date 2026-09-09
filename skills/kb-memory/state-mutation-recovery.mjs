@@ -121,13 +121,16 @@ async function withinDeadline(operation, deadlineAt) {
 /**
  * Apply a state mutation through an ETag conditional store. `read` returns `{ state, etag }` and
  * `write` returns `{ ok, status }`. A caller persists `error.receipt` after UNKNOWN and passes it
- * back unchanged on recovery. A retry never writes over a newer document unless that document
- * contains the exact immutable receipt proving the original mutation is already durable.
+ * back unchanged on recovery. `onReceipt` is awaited before each conditional write so a caller can
+ * synchronously persist the immutable receipt before a process crash can lose the write response.
+ * A retry never writes over a newer document unless that document contains the exact immutable
+ * receipt proving the original mutation is already durable.
  */
 export async function commitStateMutation({
-  agent, operationId, mutation, read, write, receipt = null, now = () => new Date().toISOString(), maxAttempts = 4, deadlineMs = 15_000,
+  agent, operationId, mutation, read, write, receipt = null, onReceipt = async () => {}, now = () => new Date().toISOString(), maxAttempts = 4, deadlineMs = 15_000,
 }) {
   if (typeof read !== "function" || typeof write !== "function") throw new Error("state mutation requires read and write functions");
+  if (typeof onReceipt !== "function") throw new Error("state mutation onReceipt must be a function");
   if (typeof agent !== "string" || !agent) throw new Error("state mutation requires agent");
   if (typeof operationId !== "string" || !/^[A-Za-z0-9._:-]{8,200}$/.test(operationId)) throw new Error("state mutation requires a safe operation id");
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new Error("state mutation deadline must be positive");
@@ -174,6 +177,9 @@ export async function commitStateMutation({
       throw new StateMutationUnknownError("state mutation durability cannot be proven against a changed state version or ETag", currentReceipt);
     }
 
+    // This lifecycle hook is deliberately before candidate creation and the conditional write. The
+    // caller must have a durable, immutable recovery record before the store can accept a write.
+    await withinDeadline(() => onReceipt(currentReceipt, { phase: "prepared" }), deadlineAt);
     const candidate = applyMutation(state, currentReceipt, intent);
     let result;
     try { result = await withinDeadline((signal) => write(candidate, snapshot.etag, signal), deadlineAt); }
