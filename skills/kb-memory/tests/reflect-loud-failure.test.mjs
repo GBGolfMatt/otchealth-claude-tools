@@ -32,25 +32,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FAILED_WRITE_FILE, appendFailedWriteFallback, distill, LLM_PROVIDER } from "../reflect.mjs";
 
-// appendFailedWriteFallback resolves its path from homedir(), which node:os does not let a test
-// override cleanly — so these tests point HOME at a throwaway temp dir for the duration of the
-// test, matching how the rest of this toolkit keeps filesystem tests hermetic (mem.mjs's own header
-// comment calls out exactly this pattern: "respects a test's temp HOME, so hermetic tests stay
-// hermetic").
-async function withTempHome(run) {
-  const dir = await mkdtemp(join(tmpdir(), "reflect-fallback-test-"));
-  const savedHome = process.env.HOME;
-  process.env.HOME = dir;
-  try { return await run(dir); } finally { process.env.HOME = savedHome; await rm(dir, { recursive: true, force: true }); }
+// Pass the cache path through the fallback API explicitly. HOME overrides do not affect
+// os.homedir() consistently on Windows and can send fixtures into the operator's normal cache.
+async function withTempCache(run) {
+  const cacheDir = await mkdtemp(join(tmpdir(), "reflect-fallback-test-"));
+  try { return await run(cacheDir); } finally { await rm(cacheDir, { recursive: true, force: true }); }
 }
 
 test("a failed lesson is appended to a per-agent fallback file, not dropped", async () => {
-  await withTempHome(async () => {
+  await withTempCache(async (cacheDir) => {
     const agent = "test-agent-alpha";
-    assert.equal(existsSync(FAILED_WRITE_FILE(agent)), false, "must not exist before any failure");
-    appendFailedWriteFallback(agent, { type: "pitfall", text: "example lost lesson", share: false }, "ERROR: put 403 AuthorizationPermissionMismatch");
-    assert.equal(existsSync(FAILED_WRITE_FILE(agent)), true);
-    const rows = (await readFile(FAILED_WRITE_FILE(agent), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(existsSync(FAILED_WRITE_FILE(agent, cacheDir)), false, "must not exist before any failure");
+    appendFailedWriteFallback(agent, { type: "pitfall", text: "example lost lesson", share: false }, "ERROR: put 403 AuthorizationPermissionMismatch", undefined, { cacheDir });
+    assert.equal(existsSync(FAILED_WRITE_FILE(agent, cacheDir)), true);
+    const rows = (await readFile(FAILED_WRITE_FILE(agent, cacheDir), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(rows.length, 1);
     assert.equal(rows[0].agent, agent);
     assert.equal(rows[0].type, "pitfall");
@@ -63,11 +58,11 @@ test("a failed lesson is appended to a per-agent fallback file, not dropped", as
 });
 
 test("multiple failures for the SAME agent append (never overwrite) so nothing already-lost gets lost again", async () => {
-  await withTempHome(async () => {
+  await withTempCache(async (cacheDir) => {
     const agent = "test-agent-beta";
-    appendFailedWriteFallback(agent, { type: "remember", text: "first lost fact" }, "err1");
-    appendFailedWriteFallback(agent, { type: "decision", text: "second lost fact", share: true }, "err2");
-    const rows = (await readFile(FAILED_WRITE_FILE(agent), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    appendFailedWriteFallback(agent, { type: "remember", text: "first lost fact" }, "err1", undefined, { cacheDir });
+    appendFailedWriteFallback(agent, { type: "decision", text: "second lost fact", share: true }, "err2", undefined, { cacheDir });
+    const rows = (await readFile(FAILED_WRITE_FILE(agent, cacheDir), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(rows.length, 2);
     assert.equal(rows[0].text, "first lost fact");
     assert.equal(rows[1].text, "second lost fact");
@@ -76,13 +71,13 @@ test("multiple failures for the SAME agent append (never overwrite) so nothing a
 });
 
 test("different agents get different fallback files (no cross-agent clobber, mirrors the real per-agent shared feed)", async () => {
-  await withTempHome(async () => {
-    appendFailedWriteFallback("agent-one", { type: "remember", text: "x" }, "e");
-    appendFailedWriteFallback("agent-two", { type: "remember", text: "y" }, "e");
-    assert.notEqual(FAILED_WRITE_FILE("agent-one"), FAILED_WRITE_FILE("agent-two"));
-    assert.ok(existsSync(FAILED_WRITE_FILE("agent-one")));
-    assert.ok(existsSync(FAILED_WRITE_FILE("agent-two")));
-    const one = (await readFile(FAILED_WRITE_FILE("agent-one"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  await withTempCache(async (cacheDir) => {
+    appendFailedWriteFallback("agent-one", { type: "remember", text: "x" }, "e", undefined, { cacheDir });
+    appendFailedWriteFallback("agent-two", { type: "remember", text: "y" }, "e", undefined, { cacheDir });
+    assert.notEqual(FAILED_WRITE_FILE("agent-one", cacheDir), FAILED_WRITE_FILE("agent-two", cacheDir));
+    assert.ok(existsSync(FAILED_WRITE_FILE("agent-one", cacheDir)));
+    assert.ok(existsSync(FAILED_WRITE_FILE("agent-two", cacheDir)));
+    const one = (await readFile(FAILED_WRITE_FILE("agent-one", cacheDir), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(one.length, 1, "agent-one's file must not contain agent-two's entry");
   });
 });
@@ -195,13 +190,11 @@ test("distill(): a non-JSON / non-array response is treated as an LLM failure, n
   assert.ok(notAnArray.llmError instanceof Error, "a bare JSON object (not wrapped in []) must also be a reported failure");
 });
 
-test("main()'s wiring: the FAIL LOUD message format matches the required distinct wording, and both exits it controls are llmError-conditional (non-literal)", async () => {
+test("main()'s wiring: LLM failure and unconfirmed state sync both exit non-zero without changing skip exits", async () => {
   const src = await readFile(new URL("../reflect.mjs", import.meta.url), "utf8");
   assert.match(src, /LLM call FAILED \(provider=\$\{LLM_PROVIDER\}\)/, "the stderr message must name the failure and the active provider");
   assert.match(src, /NOT the same as 'no lessons'/, "the message must explicitly disclaim the legitimate-empty outcome");
-  const exitCount = (src.match(/process\.exit\(llmError \? 1 : 0\)/g) || []).length;
-  assert.equal(exitCount, 2, "both the early empty-items return and the end-of-run exit must key off llmError, not a bare literal");
-  // Counterfactual: if a future edit regressed this back to a bare literal (e.g. `process.exit(0)`)
-  // on either of those two lines, this exact assertion is what would catch it -- a plain "exits 0
-  // somewhere" search would not.
+  assert.match(src, /process\.exit\(llmError \? 1 : 0\)/, "the early no-items exit must remain LLM-aware");
+  assert.match(src, /stateSyncFailed = true/, "a failed state-sync must not look like completed reflection");
+  assert.match(src, /process\.exit\(llmError \|\| stateSyncFailed \? 1 : 0\)/, "the final exit must expose unconfirmed state durability");
 });
