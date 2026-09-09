@@ -176,3 +176,25 @@ jobs:
               || { echo "MISSING platform $want under tag $TAG -- multi-arch push did not complete as expected"; exit 1; }
           done
           echo "Confirmed: both linux/amd64 and linux/arm64 are present under doc-indexer:$TAG"
+
+      - name: Verify radar and shared-state bytes in immutable ARM64 image
+        env:
+          TAG: ${{ github.event.inputs.tag || 'latest' }}
+        run: |
+          set -euo pipefail
+          INDEX=$(aws ecr describe-images --repository-name doc-indexer --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          aws ecr batch-get-image --repository-name doc-indexer --image-ids imageDigest="$INDEX" --query 'images[0].imageManifest' --output text > /tmp/radar-index.json
+          ARM=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else error("Expected exactly one ARM64 manifest") end' /tmp/radar-index.json)
+          node --test tools/radar-image-proof/verify.test.mjs
+          node tools/radar-image-proof/verify.mjs "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$ARM" radar-image-hashes.json
+          jq -n --arg source "$GITHUB_SHA" --arg index "$INDEX" --arg arm "$ARM" '{source:$source,indexDigest:$index,arm64Digest:$arm}' > radar-image-identity.json
+
+      - name: Retain radar source and image receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: radar-image-proof
+          path: |
+            radar-image-hashes.json
+            radar-image-identity.json
+          if-no-files-found: error
+          retention-days: 30
