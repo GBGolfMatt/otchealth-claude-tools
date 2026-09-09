@@ -194,7 +194,9 @@ function assertExistingOperation(prior, expected) {
       prior.caller_lane !== expected.callerLane || prior.target_lane !== expected.targetLane ||
       prior.intent_hash !== expected.intentHash || prior.wants_shared !== !!expected.wantsShared ||
       !(prior.auto_generated_key === true || prior.auto_generated_key === false) ||
-      !(prior.stage in stageRank) || typeof prior.created_at !== "string" || typeof prior.updated_at !== "string") {
+      typeof prior.stage !== "string" || !Object.hasOwn(stageRank, prior.stage) ||
+      typeof prior.created_at !== "string" || !Number.isFinite(Date.parse(prior.created_at)) ||
+      typeof prior.updated_at !== "string" || !Number.isFinite(Date.parse(prior.updated_at))) {
     throw new Error("idempotency key conflict: local outbox record is malformed or differs from the expected operation");
   }
 }

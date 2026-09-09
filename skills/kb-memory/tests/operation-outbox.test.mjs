@@ -134,15 +134,22 @@ test("an explicit-key replay rejects a corrupt outbox record even when its user 
       agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "explicit-corrupt-key-001", intent, wantsShared: false, home,
     });
     releaseOperation(first);
-    const corrupt = JSON.parse(await readFile(first._file, "utf8"));
-    corrupt.operation_id = "different-safe-operation-id";
-    await writeFile(first._file, JSON.stringify(corrupt) + "\n");
-    assert.throws(
-      () => stageOperation({
-        agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "explicit-corrupt-key-001", intent, wantsShared: false, home,
-      }),
-      /outbox record is malformed or differs/,
-    );
+    const original = JSON.parse(await readFile(first._file, "utf8"));
+    for (const corrupt of [
+      { ...original, operation_id: "different-safe-operation-id" },
+      // `toString` is inherited from Object.prototype, so this proves validation does not use `in`.
+      { ...original, stage: "toString" },
+      { ...original, created_at: "not-a-timestamp" },
+      { ...original, updated_at: "not-a-timestamp" },
+    ]) {
+      await writeFile(first._file, JSON.stringify(corrupt) + "\n");
+      assert.throws(
+        () => stageOperation({
+          agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "explicit-corrupt-key-001", intent, wantsShared: false, home,
+        }),
+        /outbox record is malformed or differs/,
+      );
+    }
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
