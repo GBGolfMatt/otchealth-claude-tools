@@ -111,14 +111,14 @@ class BuildWorkerContractTests(unittest.TestCase):
             self.skipTest("the hermetic shell contract runs on the Linux workflow runner")
         script = Path(os.environ.get("CATALOG_WORKER_BUILD_SCRIPT", "tools/neptune-trial/catalog-materializer/build-worker.sh"))
         if not script.exists():
-            self.skipTest("catalog materializer is not yet vendored into this toolkit commit")
+            self.fail("catalog materializer must be vendored before its build contract can pass")
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "repo"; component = root / "tools/neptune-trial/catalog-materializer"
             shutil.copytree(script.parent, component)
             fakebin = Path(raw) / "bin"; fakebin.mkdir(); runner_temp = Path(raw) / "runner"; runner_temp.mkdir()
             revision = "7" * 40
-            (fakebin / "git").write_text("#!/usr/bin/env bash\nif [[ \"$1\" == rev-parse && \"$2\" == --show-toplevel ]]; then echo \"$FAKE_ROOT\"; else echo \"$FAKE_REVISION\"; fi\n")
-            (fakebin / "depot").write_text("#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > \"$FAKE_DEPOT_ARGS\"\nwhile [[ $# -gt 0 ]]; do [[ \"$1\" == --metadata-file ]] && { printf '{\\\"containerimage.digest\\\":\\\"sha256:%s\\\"}' \"$FAKE_DIGEST\" > \"$2\"; exit 0; }; shift; done\nexit 1\n")
+            (fakebin / "git").write_text("#!/usr/bin/env bash\nset -euo pipefail\ncase \"$*\" in\n  'rev-parse --show-toplevel') echo \"$FAKE_ROOT\" ;;\n  'rev-parse HEAD') echo \"$FAKE_REVISION\" ;;\n  'status --porcelain -- '* ) : ;;\n  *) exit 2 ;;\nesac\n")
+            (fakebin / "depot").write_text("#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > \"$FAKE_DEPOT_ARGS\"\nwhile [[ $# -gt 0 ]]; do [[ \"$1\" == --metadata-file ]] && { printf '{\"containerimage.digest\":\"sha256:%s\"}' \"$FAKE_DIGEST\" > \"$2\"; exit 0; }; shift; done\nexit 1\n")
             (fakebin / "docker").write_text("#!/usr/bin/env bash\nset -euo pipefail\ncat \"$FAKE_MANIFEST\"\n")
             for path in fakebin.iterdir(): path.chmod(0o755)
             manifest = {"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": "sha256:" + "3" * 64}, {"platform": {"os": "linux", "architecture": "arm64"}, "digest": "sha256:" + "4" * 64}]}
