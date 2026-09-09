@@ -97,11 +97,11 @@ test("runScan(): --emit with the agent-state store NOT configured -> fails loud 
     const result = await runScan({
       emitting: true,
       detectors: [firingDetector(signal)],
-      io: {
+      io: durableIo({
         cosmosConfig: async () => null,
         cosmosPutSignal: async () => { throw new Error("must not be called when unconfigured"); },
         cosmosQuerySignals: async () => [],
-      },
+      }),
       dispatch: async (owner, text) => dispatchCalls.push([owner, text]),
     });
     assert.equal(result.configured, false);
@@ -117,17 +117,15 @@ test("runScan(): --emit with the store configured and a firing HIGH signal -> pe
   const savedExitCode = process.exitCode;
   try {
     const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "test-subject-configured", severity: "high", why: "something is wrong", suggested_action: "go fix it" });
-    const putCalls = [];
     const dispatchCalls = [];
     const result = await runScan({
       emitting: true,
       detectors: [firingDetector(signal)],
-      io: {
+      io: durableIo({
         cosmosConfig: async () => ({ backend: "postgres" }),
-        cosmosPutSignal: async (doc) => { putCalls.push(doc); return { ok: true }; },
         cosmosQuerySignals: async () => [],
         posthogEmit: async () => true, // never the real network call in a test
-      },
+      }),
       dispatch: async (owner, text) => dispatchCalls.push({ owner, text }),
     });
 
@@ -135,10 +133,6 @@ test("runScan(): --emit with the store configured and a firing HIGH signal -> pe
     assert.equal(result.persisted, 1, "the firing signal must actually be persisted, not just classified");
     assert.deepEqual(result.dispatched, [signal.id]);
     assert.notEqual(process.exitCode, 1, "a fully successful emit must not fail loud");
-
-    assert.equal(putCalls.length, 1);
-    assert.equal(putCalls[0].id, signal.id);
-    assert.equal(putCalls[0].owner, "cto");
 
     assert.equal(dispatchCalls.length, 1, "a HIGH severity firing signal must actually reach fleet-dispatch");
     assert.equal(dispatchCalls[0].owner, "cto");
@@ -155,12 +149,12 @@ test("runScan(): --emit with the store reporting configured but the write itself
     const result = await runScan({
       emitting: true,
       detectors: [firingDetector(signal)],
-      io: {
+      io: durableIo({
         cosmosConfig: async () => ({ backend: "postgres" }),
-        cosmosPutSignal: async () => { throw new Error("connection refused"); },
+        cosmosCreateSignal: async () => { throw new Error("connection refused"); },
         cosmosQuerySignals: async () => [],
         posthogEmit: async () => true, // never the real network call in a test
-      },
+      }),
       dispatch: async () => {},
     });
     assert.equal(result.persisted, 0, "the failed write must not be counted as persisted");
@@ -176,11 +170,11 @@ test("runScan(): a quiet fleet (nothing fires) with --emit and the store configu
     const result = await runScan({
       emitting: true,
       detectors: [{ NAME: "quiet-detector", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }],
-      io: {
+      io: durableIo({
         cosmosConfig: async () => ({ backend: "postgres" }),
         cosmosPutSignal: async () => { throw new Error("must not be called: nothing fired"); },
         cosmosQuerySignals: async () => [],
-      },
+      }),
       dispatch: async () => { throw new Error("must not be called: nothing fired"); },
     });
     assert.equal(result.persisted, 0);
@@ -191,7 +185,7 @@ test("runScan(): a quiet fleet (nothing fires) with --emit and the store configu
   }
 });
 
-function durableIo() {
+function durableIo(overrides = {}) {
   const docs = new Map(); let version = 0;
   return {
     docs,
@@ -205,7 +199,13 @@ function durableIo() {
       if (!current || current.etag !== etag) return { ok: false, status: 412 };
       const next = { doc, etag: String(++version) }; docs.set(key, next); return { ok: true, etag: next.etag };
     },
-    cosmosQueryDispatchSignals: async (state) => [...docs.values()].map((x) => x.doc).filter((doc) => doc.dispatch_state === state),
+    cosmosQueryDispatchSignals: async (owner, detector, state) => [...docs.values()].map((x) => x.doc).filter((doc) => doc.owner === owner && doc.detector === detector && doc.dispatch_state === state),
+    cosmosCreateSignal: async (doc) => {
+      const key = `${doc.owner}/${doc.id}`;
+      if (docs.has(key)) throw new Error("duplicate");
+      docs.set(key, { doc, etag: String(++version) }); return { ok: true, etag: String(version) };
+    },
+    ...overrides,
   };
 }
 
@@ -214,7 +214,7 @@ test("runScan(): a crash after durable pending persistence replays once on the n
   const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "crash-pending", severity: "high", why: "x", suggested_action: "y" });
   await assert.rejects(() => runScan({ emitting: true, detectors: [firingDetector(signal)], io, dispatch: async () => calls.push("send"), beforeDispatch: async () => { throw new Error("synthetic process crash"); } }));
   assert.equal(io.docs.get(`cto/${signal.id}`).doc.dispatch_state, "pending");
-  const replay = await runScan({ emitting: true, detectors: [{ NAME: "quiet", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }], io, dispatch: async () => calls.push("send") });
+  const replay = await runScan({ emitting: true, detectors: [{ NAME: "fake-detector", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }], io, dispatch: async () => calls.push("send") });
   assert.deepEqual(replay.dispatched, [signal.id]);
   assert.deepEqual(calls, ["send"]);
   assert.equal(io.docs.get(`cto/${signal.id}`).doc.dispatch_state, "sent");
@@ -226,7 +226,7 @@ test("runScan(): accepted-but-response-lost dispatch remains ambiguous and is ne
     const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "lost-response", severity: "high", why: "x", suggested_action: "y" });
     await runScan({ emitting: true, detectors: [firingDetector(signal)], io, dispatch: async () => { calls.push("accepted"); throw new Error("response lost"); } });
     assert.equal(io.docs.get(`cto/${signal.id}`).doc.dispatch_state, "ambiguous");
-    const replay = await runScan({ emitting: true, detectors: [{ NAME: "quiet", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }], io, dispatch: async () => calls.push("retry") });
+    const replay = await runScan({ emitting: true, detectors: [{ NAME: "fake-detector", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }], io, dispatch: async () => calls.push("retry") });
     assert.equal(calls.filter((x) => x === "retry").length, 0);
     assert.equal(replay.unresolved.length, 1);
     assert.equal(process.exitCode, 1);

@@ -206,21 +206,6 @@ export async function cosmosPutSignal(doc) {
   return { ok: true };
 }
 
-/** Conditional state helpers for radar's durable dispatch journal. The backend's read/replace
- * primitives preserve an etag so a stale scanner can never claim the same pending signal twice. */
-export async function cosmosReadSignal(owner, id) {
-  if (!(await _stateBackend.isConfigured())) return null;
-  return _stateBackend.readDoc(SIGNALS_CONTAINER, owner, id);
-}
-export async function cosmosReplaceSignal(owner, id, doc, etag) {
-  if (!(await _stateBackend.isConfigured())) return { ok: false, reason: "not-configured" };
-  return _stateBackend.replaceDoc(SIGNALS_CONTAINER, owner, id, doc, etag);
-}
-export async function cosmosQueryDispatchSignals(state) {
-  if (!(await _stateBackend.isConfigured())) return [];
-  return _stateBackend.queryDocs(SIGNALS_CONTAINER, "SELECT * FROM c WHERE c.dispatch_state = @state", [{ name: "@state", value: state }]);
-}
-
 /** Query the `signals` container for a single owner partition (used for cooldown/consecutive lookups
  *  and by compute-allocator's recentSignalsFor()). Fails open to "no rows" when not configured, same
  *  as the original Cosmos implementation; a real query failure once configured still throws, and

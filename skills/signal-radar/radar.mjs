@@ -21,10 +21,10 @@
 //     exits non-zero so the scheduler can surface an actionable recovery.
 //   - Cooldown + consecutive-escalate (schema.shouldFire) stop a flapping metric from spamming an inbox.
 import { execFileSync } from "node:child_process";
-import { closeConnection } from "../kb-memory/pg-state.mjs";
+import { closeConnection, createDoc, readDoc, replaceDoc, queryDocs } from "../kb-memory/pg-state.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, cosmosReadSignal, cosmosReplaceSignal, cosmosQueryDispatchSignals, posthogEmit } from "./common.mjs";
+import { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, posthogEmit } from "./common.mjs";
 import { shouldFire, isMnpiSubject, SEVERITY_RANK } from "./schema.mjs";
 
 import * as sentryErrorSpike from "./detectors/sentry-error-spike.mjs";
@@ -68,30 +68,32 @@ async function runDetectorSafely(mod) {
 /** Default dispatch: the real fleet-dispatch subprocess call. Injectable (see runScan's `dispatch`
  *  param) so a test can prove a signal actually routes to an owner's inbox without shelling out. */
 function defaultDispatch(owner, text) {
-  execFileSync("node", [DISPATCH_PATH, "send", owner, text, "--from", "signal-radar"], { stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("node", [DISPATCH_PATH, "send", owner, text, "--from", "signal-radar"], { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true });
 }
 
 const dispatchText = (s) => `[signal-radar] ${s.severity.toUpperCase()} ${s.detector}: ${s.why} Action: ${s.suggested_action}`;
+const hasEtag = (value) => typeof value === "string" && value.length > 0;
 
 /** A dispatch has no downstream idempotency key or authoritative readback. Claim it with CAS before
  * invoking the writer, then leave any interrupted/failed attempt ambiguous rather than retrying it. */
 async function deliverPending(io, dispatch, signal, now) {
   const current = await io.cosmosReadSignal(signal.owner, signal.id);
-  if (!current || current.doc.dispatch_state !== "pending") return { status: "unresolved", id: signal.id, reason: "pending record changed or disappeared" };
+  if (!current || !hasEtag(current.etag) || current.doc?.owner !== signal.owner || current.doc?.id !== signal.id || current.doc.dispatch_state !== "pending") return { status: "unresolved", id: signal.id, reason: "pending record changed, missing, or lacks an etag" };
   const claim = { ...current.doc, dispatch_state: "dispatching", dispatch_started_at: new Date(now).toISOString() };
   const claimed = await io.cosmosReplaceSignal(signal.owner, signal.id, claim, current.etag);
-  if (!claimed?.ok) return { status: "unresolved", id: signal.id, reason: "dispatch claim conflicted" };
+  if (!claimed?.ok || !hasEtag(claimed.etag)) return { status: "unresolved", id: signal.id, reason: "dispatch claim conflicted or lacks an etag" };
   try {
-    await dispatch(signal.owner, dispatchText(signal));
+    await dispatch(current.doc.owner, dispatchText(current.doc));
   } catch (error) {
-    const ambiguous = { ...claim, dispatch_state: "ambiguous", dispatch_error: String(error?.message || error) };
+    const ambiguous = { ...claim, dispatch_state: "ambiguous", dispatch_error_category: "dispatch_response_unconfirmed" };
     await io.cosmosReplaceSignal(signal.owner, signal.id, ambiguous, claimed.etag);
     return { status: "ambiguous", id: signal.id, reason: "dispatch response was not confirmed; inspect inbox before retrying" };
   }
-  const sent = { ...claim, dispatch_state: "sent", dispatched_at: new Date(now).toISOString() };
+  // fleet-dispatch has no receiver readback. `sent` means only that its bounded subprocess returned.
+  const sent = { ...claim, dispatch_state: "sent", dispatch_confirmation: "subprocess_return_only", dispatched_at: new Date(now).toISOString() };
   const recorded = await io.cosmosReplaceSignal(signal.owner, signal.id, sent, claimed.etag);
   if (!recorded?.ok) return { status: "ambiguous", id: signal.id, reason: "dispatch may have succeeded but sent receipt was not persisted" };
-  return { status: "sent", id: signal.id };
+  return { status: "sent", id: signal.id, confirmation: "subprocess_return_only" };
 }
 
 /**
@@ -110,7 +112,13 @@ export async function runScan(opts = {}) {
     only = "",
     emitting = false,
     asJson = false,
-    io = { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, cosmosReadSignal, cosmosReplaceSignal, cosmosQueryDispatchSignals, posthogEmit },
+    io = {
+      cosmosConfig, cosmosPutSignal, cosmosQuerySignals, posthogEmit,
+      cosmosCreateSignal: (doc) => createDoc("signals", doc.owner, doc),
+      cosmosReadSignal: (owner, id) => readDoc("signals", owner, id),
+      cosmosReplaceSignal: (owner, id, doc, etag) => replaceDoc("signals", owner, id, doc, etag),
+      cosmosQueryDispatchSignals: (owner, detector, state) => queryDocs("signals", "SELECT * FROM c WHERE c.dispatch_state = @state AND c.detector = @detector", [{ name: "@state", value: state }, { name: "@detector", value: detector }], { pk: owner, max: 101 }),
+    },
     dispatch = defaultDispatch,
     detectors = DETECTORS,
     now = Date.now(),
@@ -139,11 +147,15 @@ export async function runScan(opts = {}) {
   // it configured, every signal is treated as "fire" (dry-run-safe; --emit still requires the
   // agent-state store to actually persist, so a mis-provisioned store never silently double-dispatches).
   const decisions = [];
+  let historyFailure = false;
   for (const s of allSignals) {
     let history = [];
     if (cosmosCfg) {
       try { history = await io.cosmosQuerySignals(s.owner, "SELECT c.ts FROM c WHERE c.id = @id", [{ name: "@id", value: s.id }]); }
-      catch { /* fail-open: treat as no history */ }
+      catch (error) {
+        if (emitting) { console.error(`  [warn] could not read signal history ${s.id}: ${error.message}`); historyFailure = true; continue; }
+        // A dry-run remains observationally fail-open.
+      }
     }
     const cooldownMin = COOLDOWN_MIN_BY_SEVERITY[s.severity] ?? 720;
     const decision = shouldFire(history, now, { cooldownMin, escalateAfter: ESCALATE_AFTER });
@@ -153,9 +165,7 @@ export async function runScan(opts = {}) {
   const firing = decisions.filter((d) => d.fire);
   firing.sort((a, b) => (SEVERITY_RANK[a.signal.severity] ?? 9) - (SEVERITY_RANK[b.signal.severity] ?? 9));
 
-  if (asJson) {
-    console.log(JSON.stringify({ ts: new Date(now).toISOString(), emitting, detectors: perDetector.map((r) => ({ name: r.name, count: r.signals.length, error: r.error, notes: r.notes })), firing: firing.map((d) => d.signal), suppressed: decisions.length - firing.length }, null, 2));
-  } else {
+  if (!asJson) {
     console.log(`# SIGNAL RADAR scan ${new Date(now).toISOString()}  (${emitting ? "EMIT" : "dry-run"}; agent-state ${cosmosCfg ? "configured" : "NOT configured"})`);
     for (const r of perDetector) {
       console.log(`  [${r.error ? "ERR " : "ok  "}] ${r.name.padEnd(22)} ${String(r.signals.length).padStart(2)} signal(s)${r.error ? `  (${r.error})` : ""}`);
@@ -173,7 +183,8 @@ export async function runScan(opts = {}) {
     if (suppressed) console.log(`\n  (${suppressed} finding(s) suppressed by cooldown; a flapping metric will not spam an inbox)`);
   }
 
-  if (!emitting) return { firing: firing.map((d) => d.signal), configured: !!cosmosCfg, persisted: null, dispatched: null };
+  const report = { ts: new Date(now).toISOString(), emitting, detectors: perDetector.map((r) => ({ name: r.name, count: r.signals.length, error: r.error, notes: r.notes })), firing: firing.map((d) => d.signal), suppressed: decisions.length - firing.length };
+  if (!emitting) return { ...report, configured: !!cosmosCfg, persisted: null, dispatched: null, unresolved: [] };
 
   // FAIL LOUD, not silent-success: this is the exact incident that motivated this whole rewrite (see
   // the header notice above and common.mjs's identical history) -- a scheduled job that ran every 30
@@ -185,22 +196,30 @@ export async function runScan(opts = {}) {
   if (!cosmosCfg) {
     console.error("[signal-radar] --emit requested but the agent-state store is not configured (aws-pg-host/aws-pg-master-user/aws-pg-master-password unavailable in AWS SSM /otchealth/*); nothing persisted or dispatched.");
     process.exitCode = 1;
-    return { firing: firing.map((d) => d.signal), configured: false, persisted: 0, dispatched: [] };
+    return { ...report, configured: false, persisted: 0, dispatched: [], unresolved: [{ state: "blocked", reason: "agent-state store unavailable" }] };
+  }
+
+  const durable = ["cosmosCreateSignal", "cosmosReadSignal", "cosmosReplaceSignal", "cosmosQueryDispatchSignals"].every((name) => typeof io[name] === "function");
+  if (!durable || historyFailure) {
+    console.error(`[signal-radar] durable dispatch journal unavailable or history unreadable; no signals dispatched.`);
+    process.exitCode = 1;
+    return { ...report, configured: true, persisted: 0, dispatched: [], unresolved: [{ state: "blocked", reason: !durable ? "durable journal API unavailable" : "history read failed" }] };
   }
 
   const dispatched = [];
   const unresolved = [];
   let persisted = 0;
-  const durable = typeof io.cosmosReadSignal === "function" && typeof io.cosmosReplaceSignal === "function" && typeof io.cosmosQueryDispatchSignals === "function";
-  if (durable) {
-    for (const state of ["pending", "dispatching", "ambiguous"]) {
-      const rows = await io.cosmosQueryDispatchSignals(state);
-      for (const s of rows) {
+  let persistFailures = 0;
+  const replayedIds = new Set();
+  const replayScopes = [...new Map(targets.flatMap((d) => [[`${d.OWNER}/${d.NAME}`, { owner: d.OWNER, detector: d.NAME }], [`cfo/${d.NAME}`, { owner: "cfo", detector: d.NAME }]])).values()];
+  for (const scope of replayScopes) for (const state of ["pending", "dispatching", "ambiguous"]) {
+      const rows = await io.cosmosQueryDispatchSignals(scope.owner, scope.detector, state);
+      if (rows.length > 100) unresolved.push({ state: "backlog", reason: `replay backlog reached 100 ${state} records; rerun after inspection` });
+      for (const s of rows.slice(0, 100)) {
         if (state !== "pending") { unresolved.push({ id: s.id, state, reason: "dispatch outcome is ambiguous; inspect inbox before retrying" }); continue; }
         const outcome = await deliverPending(io, dispatch, s, now);
-        if (outcome.status === "sent") dispatched.push(s.id); else unresolved.push(outcome);
+        if (outcome.status === "sent") { dispatched.push(s.id); replayedIds.add(s.id); } else unresolved.push(outcome);
       }
-    }
   }
   for (const d of firing) {
     const s = d.signal;
@@ -214,22 +233,29 @@ export async function runScan(opts = {}) {
     // reading it -- reflects what happened, not what was attempted.
     let persistedThisSignal = false;
     try {
-      if (durable) {
-        const existing = await io.cosmosReadSignal(s.owner, s.id);
-        if (["dispatching", "ambiguous"].includes(existing?.doc?.dispatch_state)) {
+      if (replayedIds.has(s.id)) continue;
+      const existing = await io.cosmosReadSignal(s.owner, s.id);
+      if (["dispatching", "ambiguous"].includes(existing?.doc?.dispatch_state)) {
           unresolved.push({ id: s.id, state: existing.doc.dispatch_state, reason: "existing dispatch outcome is ambiguous; inspect inbox before retrying" });
           continue;
-        }
       }
+      if (existing?.doc?.dispatch_state === "pending") continue;
+      if (existing?.doc && !shouldFire([existing.doc], now, { cooldownMin: COOLDOWN_MIN_BY_SEVERITY[s.severity] ?? 720, escalateAfter: ESCALATE_AFTER }).fire) continue;
       const needsDispatch = s.severity === "high" || d.escalate;
-      const put = await io.cosmosPutSignal({ id: s.id, owner: s.owner, ...s, escalate: d.escalate, consecutive: d.consecutive, dispatch_state: needsDispatch ? "pending" : "not_required" });
+      const journal = { id: s.id, owner: s.owner, ...s, escalate: d.escalate, consecutive: d.consecutive, dispatch_state: needsDispatch ? "pending" : "not_required" };
+      let put;
+      if (!existing) put = await io.cosmosCreateSignal(journal);
+      else {
+        if (!hasEtag(existing.etag)) throw new Error("existing signal lacks etag");
+        put = await io.cosmosReplaceSignal(s.owner, s.id, journal, existing.etag);
+      }
       // cosmosPutSignal reports "not-configured" as a value, not a throw; a write that did not happen
       // must never count as persisted, whichever way it says so.
-      if (put && put.ok === false) throw new Error(`put refused: ${put.reason || "unknown"}`);
+      if (put?.ok !== true) throw new Error(`put refused: ${put?.reason || "unknown"}`);
       persisted++;
       persistedThisSignal = true;
     }
-    catch (e) { console.error(`  [warn] could not persist signal ${s.id}: ${e.message}`); }
+    catch (e) { persistFailures++; console.error(`  [warn] could not persist signal ${s.id}: ${e.message}`); }
 
     // Dispatch must be causally downstream of a confirmed durable record. A failed write is already
     // a non-zero outcome below, and must never still page an owner with an unjournaled signal.
@@ -243,16 +269,8 @@ export async function runScan(opts = {}) {
     // to routing, not just cooldown.
     if (s.severity === "high" || d.escalate) {
       if (beforeDispatch) await beforeDispatch(s);
-      if (durable) {
-        const outcome = await deliverPending(io, dispatch, s, now);
-        if (outcome.status === "sent") dispatched.push(s.id); else unresolved.push(outcome);
-        continue;
-      }
-      const text = dispatchText(s);
-      try {
-        await dispatch(s.owner, text);
-        dispatched.push(s.id);
-      } catch (e) { console.error(`  [warn] dispatch to ${s.owner} failed for ${s.id}: ${e.message}`); }
+      const outcome = await deliverPending(io, dispatch, s, now);
+      if (outcome.status === "sent") dispatched.push(s.id); else unresolved.push(outcome);
     }
   }
   // Narration only, never part of the structured contract: in --json mode this MUST go to stderr so
@@ -262,18 +280,21 @@ export async function runScan(opts = {}) {
       ? `[signal-radar] persisted ${persisted} signal(s); dispatched ${dispatched.length} to owner inbox(es).`
       : `[signal-radar] persisted ${persisted}/${firing.length} signal(s) (${firing.length - persisted} FAILED, see [warn] lines above); dispatched ${dispatched.length} to owner inbox(es).`;
   if (asJson) console.error(summaryLine); else console.log(`\n${summaryLine}`);
+  if (unresolved.length) console.error(`[signal-radar] ${unresolved.length} unresolved dispatch record(s); inspect the durable journal before retrying.`);
 
   // FAIL LOUD on a partial or total persist failure too: the store answered "configured" but a real
   // write still failed (unreachable/permission/auth), the second half of "unconfigured or unreachable"
   // this whole change exists to make loud. Only firing.length > 0 can trip this -- a quiet fleet with
   // nothing to persist is a genuine, honest success, not this failure class.
-  if (persisted < firing.length || unresolved.length) process.exitCode = 1;
+  if (persistFailures || unresolved.length) process.exitCode = 1;
 
-  return { firing: firing.map((d) => d.signal), configured: true, persisted, dispatched, unresolved };
+  return { ...report, configured: true, persisted, dispatched, unresolved };
 }
 
 async function scan() {
-  return runScan({ only: val("--only", ""), emitting: FLAG("--emit"), asJson: FLAG("--json") });
+  const result = await runScan({ only: val("--only", ""), emitting: FLAG("--emit"), asJson: FLAG("--json") });
+  if (FLAG("--json")) console.log(JSON.stringify(result, null, 2));
+  return result;
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
