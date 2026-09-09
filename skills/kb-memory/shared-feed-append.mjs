@@ -18,6 +18,19 @@ function intentFingerprint(callerLane, targetLane, key) {
   return crypto.createHash("sha256").update("shared-memory-v1\0" + callerLane + "\0" + targetLane + "\0" + key).digest("hex");
 }
 
+// Cross-writer retry contract. This intentionally excludes generated row fields (id, ts), writer
+// attribution, and lane/key fields (already covered by writeIntent). Keep this byte layout aligned
+// with gateway src/memory/store.ts.
+function sharedLogicalIntent(entry) {
+  return {
+    type: entry.type,
+    text: entry.text,
+    tags: entry.tags ?? [],
+    source: entry.source ?? null,
+    supersedes: entry.supersedes ?? null,
+  };
+}
+
 export function compareSharedRows(left, right) {
   return String(left?.ts || "").localeCompare(String(right?.ts || "")) ||
     String(left?.id || "").localeCompare(String(right?.id || ""));
@@ -64,7 +77,11 @@ export async function appendSharedCas({
   const key = idempotencyKey?.trim();
   const writeIntent = key ? intentFingerprint(callerLane, agent, key) : undefined;
   const defaultIntent = (() => { const { id, ts, ...rest } = entry; return rest; })();
-  const contentIntent = writeIntent ? crypto.createHash("sha256").update(JSON.stringify(idempotencyIntent ?? defaultIntent)).digest("hex") : undefined;
+  // Shared rows must derive the hash from the durable logical row, never from a client command
+  // envelope. Private keyed writes retain their existing caller-supplied intent behavior.
+  const contentIntent = writeIntent
+    ? crypto.createHash("sha256").update(JSON.stringify(decorateAgent ? sharedLogicalIntent(entry) : (idempotencyIntent ?? defaultIntent))).digest("hex")
+    : undefined;
   const candidate = { ...entry, ...(decorateAgent ? { agent } : {}), ...(writeIntent ? { write_intent: writeIntent, write_intent_content: contentIntent } : {}) };
   let lastError;
   let writeStarted = false;

@@ -443,7 +443,7 @@ async function cList(prefix) {
   return cListAzureAll(prefix);
 }
 const sharedKey = (agent) => `${SHARED_PREFIX}${agent}.jsonl`;
-async function publishShared(agent, entry, operationIntent) {
+async function publishShared(agent, entry) {
   if (NO_SHARE.has(agent)) { console.error(`[kb-memory] NOTE: ${agent} is privileged; entry kept in the private lane only (NOT shared to the exec team).`); return false; }
   await commonsInit();
   const key = sharedKey(agent);
@@ -454,7 +454,6 @@ async function publishShared(agent, entry, operationIntent) {
     agent,
     callerLane: AGENT,
     idempotencyKey: IDEMPOTENCY_KEY || undefined,
-    idempotencyIntent: operationIntent || { command: cmd, text: TEXT, tags: TAGS, source: SOURCE, was: WAS, supersedes: SUPERSEDES, target: ON },
   });
   if (result.durability === "UNKNOWN") {
     console.error("SHARED_PUBLICATION_RESULT " + JSON.stringify({ durability: "UNKNOWN", entry_id: result.entry?.id, retry_with_same_key: result.retry_with_same_key }));
@@ -598,10 +597,10 @@ async function append(type, share) {
   let rows, entry, shared = false;
   if (IDEMPOTENCY_KEY) {
     ({ rows, entry, shared } = await commitKeyedAppend(buildEntry, intent, wantsShared));
-    if ((share || type === "status") && NO_SHARE.has(AGENT)) await publishShared(AGENT, entry, intent);
+    if ((share || type === "status") && NO_SHARE.has(AGENT)) await publishShared(AGENT, entry);
   } else {
     ({ rows, entry } = await commitAppend(buildEntry));
-    if (share || type === "status") shared = await publishShared(AGENT, entry, intent);
+    if (share || type === "status") shared = await publishShared(AGENT, entry);
   }
   maybeIndex(entry, shared);
   emitFleet(entry, shared);
