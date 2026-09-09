@@ -187,6 +187,17 @@ function pendingOperationKey(agent, callerLane, targetLane, intentHash, wantsSha
   if (matches.length > 1) throw new Error("multiple pending memory operations match this unkeyed intent; refusing to guess");
   return matches[0] || null;
 }
+function assertExistingOperation(prior, expected) {
+  const expectedId = operationIdentity(expected.callerLane, expected.targetLane, expected.key);
+  if (!prior || typeof prior !== "object" || prior.version !== 1 ||
+      prior.operation_id !== expectedId || prior.idempotency_key !== expected.key ||
+      prior.caller_lane !== expected.callerLane || prior.target_lane !== expected.targetLane ||
+      prior.intent_hash !== expected.intentHash || prior.wants_shared !== !!expected.wantsShared ||
+      !(prior.auto_generated_key === true || prior.auto_generated_key === false) ||
+      !(prior.stage in stageRank) || typeof prior.created_at !== "string" || typeof prior.updated_at !== "string") {
+    throw new Error("idempotency key conflict: local outbox record is malformed or differs from the expected operation");
+  }
+}
 
 export function stageOperation({
   agent, callerLane, targetLane, idempotencyKey, intent, wantsShared, home, cacheDir, _lockTestHooks,
@@ -206,10 +217,10 @@ export function stageOperation({
   try {
     if (existsSync(file)) {
       const prior = JSON.parse(readFileSync(file, "utf8"));
-      if (prior.idempotency_key !== key || prior.caller_lane !== callerLane || prior.target_lane !== targetLane ||
-          prior.intent_hash !== intent_hash || prior.wants_shared !== !!wantsShared) {
-        throw new Error("idempotency key conflict: local outbox intent differs");
-      }
+      // Keep the caller-visible idempotency conflict distinct from on-disk corruption. Existing
+      // clients already use this refusal to explain a changed caller intent.
+      if (prior?.intent_hash !== intent_hash) throw new Error("idempotency key conflict: local outbox intent differs");
+      assertExistingOperation(prior, { key, callerLane, targetLane, intentHash: intent_hash, wantsShared });
       return { ...prior, _file: file, _lock: lock };
     }
     const now = new Date().toISOString();

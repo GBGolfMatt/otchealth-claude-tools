@@ -126,6 +126,26 @@ test("an explicit key cannot be replayed with a different intent", async () => {
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test("an explicit-key replay rejects a corrupt outbox record even when its user intent fields match", async () => {
+  const home = await mkdtemp(join(tmpdir(), "memory-explicit-corrupt-"));
+  const intent = { type: "fact", text: "synthetic explicit corruption", share: false };
+  try {
+    const first = stageOperation({
+      agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "explicit-corrupt-key-001", intent, wantsShared: false, home,
+    });
+    releaseOperation(first);
+    const corrupt = JSON.parse(await readFile(first._file, "utf8"));
+    corrupt.operation_id = "different-safe-operation-id";
+    await writeFile(first._file, JSON.stringify(corrupt) + "\n");
+    assert.throws(
+      () => stageOperation({
+        agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "explicit-corrupt-key-001", intent, wantsShared: false, home,
+      }),
+      /outbox record is malformed or differs/,
+    );
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("an active operation lock rejects a competing process for the same scoped key", async () => {
   const home = await mkdtemp(join(tmpdir(), "memory-lock-"));
   const runner = join(home, "contender.mjs");

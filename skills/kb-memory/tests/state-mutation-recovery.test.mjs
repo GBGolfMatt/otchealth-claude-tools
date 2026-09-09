@@ -147,6 +147,18 @@ test("a state document for another agent is rejected before any write", async ()
   assert.equal(remote.state.goal, "");
 });
 
+test("a legacy state document without an agent is upgraded only into its bound target lane", async () => {
+  const legacy = base();
+  delete legacy.agent;
+  const remote = store(legacy);
+  const result = await commitStateMutation({
+    agent: "cto", operationId: "state-legacy-agent-001", mutation: setGoal("upgrade in place"), ...remote,
+  });
+  assert.equal(result.state.agent, "cto");
+  assert.equal(remote.state.agent, "cto");
+  assert.equal(remote.state.goal, "upgrade in place");
+});
+
 test("the immutable receipt is persisted before a conditional write", async () => {
   const remote = store();
   let persisted = null;

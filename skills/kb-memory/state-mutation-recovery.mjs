@@ -156,8 +156,13 @@ export async function commitStateMutation({
       }
       throw error;
     }
-    const state = snapshot?.state;
-    if (!state || typeof state !== "object") throw new Error("state mutation read returned no state object");
+    const storedState = snapshot?.state;
+    if (!storedState || typeof storedState !== "object") throw new Error("state mutation read returned no state object");
+    // `_STATE/<agent>.json` predates the explicit `agent` field.  Treat only an absent field as
+    // legacy, then carry the bound agent into the conditional candidate.  A present but different
+    // value remains a hard refusal, so compatibility cannot turn a cross-agent document into an
+    // authorized target.
+    const state = storedState.agent === undefined ? { ...storedState, agent } : storedState;
     if (state.agent !== agent) throw new Error("state mutation read returned a different agent state");
     const durable = receiptsFrom(state).find((item) => item.operation_id === operationId);
     if (durable) {
