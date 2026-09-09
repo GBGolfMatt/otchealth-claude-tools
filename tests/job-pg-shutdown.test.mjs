@@ -81,6 +81,7 @@ export const newId=()=> 'fixture';
         child.once('exit', (code, signal) => { clearTimeout(timer); resolve({code, signal}); });
       });
       assert.equal(result.code, partial ? 1 : 0, stderr);
+      if (partial) assert.match(stderr, /signal journal write failed/, "the partial-persistence failure path must be the reason for exit 1");
       assert.equal(result.signal, null);
       assert.ok(queries >= 1, 'the test must open and query the real state connection');
       assert.equal(terminations, 1, 'the real wire client must send PostgreSQL Terminate');
