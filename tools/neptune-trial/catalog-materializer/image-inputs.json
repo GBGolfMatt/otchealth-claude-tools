@@ -1,0 +1,20 @@
+{
+  "schema": "cfo-catalog-worker-image-inputs-v1",
+  "verified_at": "2026-09-09",
+  "base_image": "docker.io/library/python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254",
+  "platform_manifests": {
+    "linux/amd64": "sha256:9c47360a2a0355e2da18516d0b1c2126ec22c195d2185e97347c9d98398c5bef",
+    "linux/arm64": "sha256:d04f49f5882f49a3b91f874e75e19f0c265f7222da8659741a9d7eab148f22a9"
+  },
+  "dependency_authority": "https://pypi.org/pypi/boto3/1.43.90/json",
+  "dependency_lock": "requirements.lock",
+  "dependency_wheels": "public PyPI wheel bytes verified by SHA-256, all architecture independent",
+  "worker_deadline_seconds": 600,
+  "termination_grace_seconds": 30,
+  "source_max_bytes": 201326592,
+  "output_max_bytes": 201326592,
+  "source_max_rows": 100000,
+  "source_max_line_bytes": 1048576,
+  "image_built": false,
+  "live_source_run": false
+}

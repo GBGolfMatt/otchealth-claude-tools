@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!requirements.lock
+!materialize.py
+!worker.py
+!supervisor.py
+!test_materialize.py
+!test_supervisor.py
