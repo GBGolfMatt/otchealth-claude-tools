@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a vendored catalog worker against a local, immutable CTO source commit."""
+"""Verify worker bytes against a reviewed manifest exported from CTO Git blobs."""
 import argparse, hashlib, json, os, subprocess, sys
 from pathlib import Path, PurePosixPath
 
@@ -8,7 +8,7 @@ COMPONENT = "tools/neptune-trial/catalog-materializer"
 
 def safe_path(value):
     p = PurePosixPath(value)
-    if not value or value == "." or p.is_absolute() or ".." in p.parts or "\\" in value or ":" in value: raise ValueError("unsafe path")
+    if not value or any(x in ("", ".", "..") for x in value.split("/")) or p.is_absolute() or "\\" in value or ":" in value: raise ValueError("unsafe path")
     return p
 
 def digest(path):
@@ -41,13 +41,13 @@ def main():
         except (KeyError, ValueError): raise SystemExit("unsafe manifest path")
         if key in expected or not isinstance(entry.get("size"), int) or entry["size"] < 0 or len(entry.get("sha256", "")) != 64 or any(c not in "0123456789abcdef" for c in entry["sha256"]): raise SystemExit("invalid manifest entry")
         expected[key] = entry
-    root = Path(a.component_dir)
+    root = Path(os.path.abspath(a.component_dir))
     for ancestor in (root, *root.parents):
-        if ancestor.is_symlink(): raise SystemExit("symlink or junction found in component path")
+        if ancestor.is_symlink() or (hasattr(ancestor, "is_junction") and ancestor.is_junction()): raise SystemExit("symlink or junction found in component path")
     root = root.resolve()
     actual = {}
     for path in root.rglob("*"):
-        if path.is_symlink(): raise SystemExit("symlink found in vendor component")
+        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()): raise SystemExit("symlink or junction found in vendor component")
         if path.is_file(): actual[path.relative_to(root).as_posix()] = path
     if set(actual) != set(expected): raise SystemExit("vendor files differ from manifest")
     proof = []
