@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import {
-  chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
+  chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync,
   renameSync, rmdirSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -13,13 +13,15 @@ function stable(value) {
 }
 function hash(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
 const stageRank = { staged: 0, private_stored: 1, shared_unknown: 2, shared_stored: 3 };
+const safeKey = (key) => /^[A-Za-z0-9._:-]{8,128}$/.test(key);
 
 export function operationIdentity(callerLane, targetLane, key) {
   return hash("memory-dual-write-v1\0" + callerLane + "\0" + targetLane + "\0" + key);
 }
 export function operationIntentHash(intent) { return hash(JSON.stringify(stable(intent))); }
-export function operationOutboxFile(agent, operationId, home = homedir()) {
-  return join(home, ".claude", "kb-cache", "_write-outbox-" + (agent || "unknown"), operationId + ".json");
+export function operationOutboxFile(agent, operationId, home = homedir(), cacheDir = null) {
+  const directory = cacheDir || join(home, ".claude", "kb-cache");
+  return join(directory, "_write-outbox-" + (agent || "unknown"), operationId + ".json");
 }
 function syncDirectory(path) {
   try { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } } catch {}
@@ -148,15 +150,43 @@ function storedRecord(operation) {
   }
   return current;
 }
+function pendingOperationKey(agent, callerLane, targetLane, intentHash, wantsShared, home, cacheDir) {
+  const directory = dirname(operationOutboxFile(agent, "placeholder", home, cacheDir));
+  let names;
+  try { names = readdirSync(directory); } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  const matches = [];
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    try {
+      const file = join(directory, name);
+      if (statSync(file).size > 65536) continue;
+      const record = JSON.parse(readFileSync(file, "utf8"));
+      if (record.caller_lane !== callerLane || record.target_lane !== targetLane || record.intent_hash !== intentHash ||
+          record.wants_shared !== !!wantsShared || !safeKey(record.idempotency_key) ||
+          record.operation_id !== operationIdentity(callerLane, targetLane, record.idempotency_key)) continue;
+      matches.push(record.idempotency_key);
+    } catch {}
+  }
+  if (matches.length > 1) throw new Error("multiple pending memory operations match this unkeyed intent; refusing to guess");
+  return matches[0] || null;
+}
 
 export function stageOperation({
-  agent, callerLane, targetLane, idempotencyKey, intent, wantsShared, home, _lockTestHooks,
+  agent, callerLane, targetLane, idempotencyKey, intent, wantsShared, home, cacheDir, _lockTestHooks,
 }) {
-  const key = String(idempotencyKey || "").trim();
-  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key)) throw new Error("idempotency key must be 8-128 safe characters");
-  const operation_id = operationIdentity(callerLane, targetLane, key);
+  const suppliedKey = String(idempotencyKey || "").trim();
+  if (suppliedKey && !safeKey(suppliedKey)) throw new Error("idempotency key must be 8-128 safe characters");
   const intent_hash = operationIntentHash(intent);
-  const file = operationOutboxFile(agent, operation_id, home);
+  // Unkeyed CLI writes still receive a durable, random operation key. A later identical invocation
+  // reuses it only while its outbox record remains, so it recovers an ambiguous PUT without turning
+  // every future identical note into a permanent dedupe.
+  const key = suppliedKey || pendingOperationKey(agent, callerLane, targetLane, intent_hash, wantsShared, home, cacheDir) ||
+    "auto-" + crypto.randomBytes(24).toString("hex");
+  const operation_id = operationIdentity(callerLane, targetLane, key);
+  const file = operationOutboxFile(agent, operation_id, home, cacheDir);
   mkdirSync(dirname(file), { recursive: true });
   const lock = acquireLock(file, _lockTestHooks);
   try {
@@ -171,7 +201,8 @@ export function stageOperation({
     const now = new Date().toISOString();
     const record = {
       version: 1, operation_id, idempotency_key: key, caller_lane: callerLane, target_lane: targetLane,
-      intent_hash, wants_shared: !!wantsShared, stage: "staged", created_at: now, updated_at: now,
+      intent_hash, wants_shared: !!wantsShared, auto_generated_key: !suppliedKey,
+      stage: "staged", created_at: now, updated_at: now,
     };
     try { durableWriteNew(file, record); }
     catch (error) {

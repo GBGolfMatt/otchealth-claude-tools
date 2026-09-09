@@ -48,12 +48,26 @@ export function appendFailedWriteFallback(agent, item, error, source = "reflect.
     // them, so reflect.mjs's own calls (which never pass these) produce byte-identical rows to before.
     if (item.was) row.was = item.was;
     if (item.on) row.on = item.on;
-    for (const field of ["idempotency_key", "operation_id", "operation_stage", "intent_hash", "private_entry_id"]) {
+    for (const field of ["idempotency_key", "operation_id", "operation_stage", "intent_hash", "private_entry_id", "shared_durability", "reconciliation_lane", "reconciliation_entry_id", "reconciliation_intent_hash"]) {
       if (item[field]) row[field] = item[field];
     }
     appendFileSync(file, JSON.stringify(row) + "\n");
     try { chmodSync(file, 0o600); } catch {} // cheap + idempotent; matches the 0600 posture the rest of kb-cache uses for anything sensitive
   } catch (e) {
     console.error(`[kb-memory] FALLBACK WRITE ALSO FAILED for agent '${agent}': ${e.message}. The item above is genuinely unrecoverable from this run.`);
+  }
+}
+
+export function appendReconciliationReceipt(agent, entryId, intentHash, { cacheDir = defaultCacheDir() } = {}) {
+  try {
+    if (typeof entryId !== "string" || typeof intentHash !== "string") throw new Error("invalid reconciliation receipt");
+    mkdirSync(cacheDir, { recursive: true });
+    appendFileSync(FAILED_WRITE_FILE(agent, cacheDir), JSON.stringify({
+      ts: new Date().toISOString(), agent, reconciliation: "resolved",
+      reconciliation_entry_id: entryId, reconciliation_intent_hash: intentHash,
+    }) + "\n");
+    try { chmodSync(FAILED_WRITE_FILE(agent, cacheDir), 0o600); } catch {}
+  } catch (error) {
+    console.error(`[kb-memory] RECONCILIATION RECEIPT WRITE FAILED for agent '${agent}': ${error.message}.`);
   }
 }

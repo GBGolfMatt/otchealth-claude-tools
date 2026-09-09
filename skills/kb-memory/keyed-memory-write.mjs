@@ -18,23 +18,29 @@ function attachOperation(error, operation) { error.operation = operation; return
 
 export async function commitKeyedMemoryWrite({
   agent, callerLane = agent, targetLane = agent, idempotencyKey, intent, wantsShared,
-  buildEntry, privateStore, sharedStore, outboxHome, deadlineMs = 15_000, onOperation = () => {},
+  buildEntry, privateStore, sharedStore, outboxHome, outboxCacheDir, deadlineMs = 15_000, onOperation = () => {},
 }) {
   if (!privateStore?.read || !privateStore?.write) throw new Error("private store read/write are required");
   if (wantsShared && (!sharedStore?.read || !sharedStore?.write)) throw new Error("shared store read/write are required");
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new Error("keyed memory operation deadline must be positive");
   const deadlineAt = Date.now() + deadlineMs;
-  let operation = stageOperation({ agent, callerLane, targetLane, idempotencyKey, intent, wantsShared, home: outboxHome });
+  let operation = stageOperation({ agent, callerLane, targetLane, idempotencyKey, intent, wantsShared, home: outboxHome, cacheDir: outboxCacheDir });
   onOperation(operation);
   try {
+    // `stageOperation` generates the durable key for an unkeyed CLI invocation. Every CAS append
+    // must use that stored key, rather than the absent caller argument, so a restarted operation
+    // can find a PUT that succeeded after its response was lost.
+    const durableKey = operation.idempotency_key;
     const initial = await withinDeadline((signal) => privateStore.read(signal), deadlineAt);
     const candidate = buildEntry(parseNdjson(initial.text));
     let privateEntry = await appendSharedCas({
       read: privateStore.read, write: privateStore.write, entry: candidate, agent: targetLane,
-      callerLane, idempotencyKey, idempotencyIntent: intent, decorateAgent: false,
+      callerLane, idempotencyKey: durableKey, idempotencyIntent: intent, decorateAgent: false,
       deadlineAt,
     });
-    if (privateEntry?.durability === "UNKNOWN") throw Object.assign(new Error(privateEntry.reason), privateEntry);
+    if (privateEntry?.durability === "UNKNOWN") {
+      throw Object.assign(new Error(privateEntry.reason), privateEntry, { reconciliation_lane: "private" });
+    }
     const finalPrivate = await withinDeadline((signal) => privateStore.read(signal), deadlineAt);
     const privateRows = parseNdjson(finalPrivate.text);
     operation = advanceOperation(operation, "private_stored", { private_entry_id: privateEntry.id });
@@ -44,13 +50,13 @@ export async function commitKeyedMemoryWrite({
     if (wantsShared) {
       const sharedEntry = await appendSharedCas({
         read: sharedStore.read, write: sharedStore.write, entry: privateEntry, agent,
-        callerLane, idempotencyKey, idempotencyIntent: intent,
+        callerLane, idempotencyKey: durableKey, idempotencyIntent: intent,
         deadlineAt,
       });
       if (sharedEntry?.durability === "UNKNOWN") {
         operation = advanceOperation(operation, "shared_unknown", { shared_entry_id: privateEntry.id });
         onOperation(operation);
-        throw Object.assign(new Error(sharedEntry.reason), sharedEntry);
+        throw Object.assign(new Error(sharedEntry.reason), sharedEntry, { reconciliation_lane: "shared" });
       }
       operation = advanceOperation(operation, "shared_stored", { shared_entry_id: sharedEntry.id });
       onOperation(operation);

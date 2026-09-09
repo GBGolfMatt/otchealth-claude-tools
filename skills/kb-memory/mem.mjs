@@ -49,7 +49,9 @@ import { assertCrossLaneAllowed } from "./lane-policy.mjs";
 import { getTextFromS3, getTextMetaFromS3, putObjectToS3, listBlobsFromS3, s3Configured } from "./s3-blob.mjs";
 import { awsCredsPresent } from "./aws-secret.mjs";
 import { FAILED_WRITE_FILE, appendFailedWriteFallback } from "./local-fallback.mjs";
+import { appendReconciliationReceipt } from "./local-fallback.mjs";
 import { commitKeyedMemoryWrite } from "./keyed-memory-write.mjs";
+import { operationIntentHash } from "./operation-outbox.mjs";
 import { redactSecrets } from "./redact.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url)); // for spawning sibling scripts (index-one.mjs)
 
@@ -128,6 +130,7 @@ const SHARE = argv.includes("--share");
 const N = parseInt(takeVal("--n", "40"), 10) || 40;
 const QUERY = takeVal("--query", "");
 let ACTIVE_OPERATION = null;
+let ACTIVE_RECONCILIATION_INTENT_HASH = null;
 
 // ---- Secret Manager (claude-driver SA) ----
 // Resolve the claude-driver SA from the env var OR, failing that, from disk. This closes the
@@ -328,10 +331,10 @@ async function commitAppend(buildEntry, attempts = 6) {
   throw new Error(`kb-memory: append lost the optimistic-concurrency race after ${attempts} attempts (last ${lastConflict}); no data was clobbered`);
 }
 
-async function commitKeyedAppend(buildEntry, intent, wantsShared) {
+async function commitKeyedAppend(buildEntry, intent, wantsShared, idempotencyKey = IDEMPOTENCY_KEY) {
   if (wantsShared) await commonsInit();
   const result = await commitKeyedMemoryWrite({
-    agent: AGENT, callerLane: AGENT, targetLane: ON, idempotencyKey: IDEMPOTENCY_KEY,
+    agent: AGENT, callerLane: AGENT, targetLane: ON, idempotencyKey,
     intent, wantsShared, buildEntry,
     privateStore: {
       read: (signal) => getTextMeta(JSONL, signal),
@@ -344,6 +347,7 @@ async function commitKeyedAppend(buildEntry, intent, wantsShared) {
       read: (signal) => cGetMeta(sharedKey(AGENT), signal),
       write: (body, etag, signal) => cPutCond(sharedKey(AGENT), body, etag, signal),
     } : undefined,
+    outboxCacheDir: CACHE_DIR,
     onOperation: (operation) => { ACTIVE_OPERATION = operation; },
   });
   writeCacheRows(KEYBASE, result.rows);
@@ -462,6 +466,58 @@ async function publishShared(agent, entry) {
     throw error;
   }
   return true;
+}
+function validReconciliationEntryId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
+}
+function fallbackRows() {
+  try {
+    const raw = readFileSync(FAILED_WRITE_FILE(AGENT, CACHE_DIR), "utf8").slice(-65536);
+    return raw.split(/\r?\n/).filter(Boolean).map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+  } catch { return []; }
+}
+function fallbackRowsForReconciliation() {
+  try {
+    const rows = fallbackRows();
+    const resolved = new Set(rows.filter((row) => row.reconciliation === "resolved")
+      .map((row) => row.reconciliation_entry_id + "\0" + row.reconciliation_intent_hash));
+    return rows.filter((row) => !row.operation_id && row.shared_durability === "UNKNOWN" && validReconciliationEntryId(row.reconciliation_entry_id) &&
+      typeof row.reconciliation_intent_hash === "string" && !resolved.has(row.reconciliation_entry_id + "\0" + row.reconciliation_intent_hash));
+  } catch { return []; }
+}
+async function reconcileUnknownSharedWrite(intent) {
+  if (IDEMPOTENCY_KEY || !intent.share) return null;
+  const intentHash = operationIntentHash(intent);
+  const candidate = fallbackRowsForReconciliation().reverse().find((row) =>
+    row.agent === AGENT && row.type === intent.command && row.text === intent.text && row.share === true &&
+    row.reconciliation_intent_hash === intentHash,
+  );
+  if (!candidate) return null;
+  const originalId = candidate.reconciliation_entry_id;
+  const unknown = (reason) => Object.assign(new Error(reason), {
+    durability: "UNKNOWN", entry: { id: originalId }, reconciliation_intent_hash: intentHash,
+  });
+  let privateRows;
+  try { privateRows = parseNdjson(await getText(JSONL)); }
+  catch (error) { throw unknown("cannot read private row " + originalId + " for shared reconciliation: " + String(error)); }
+  const original = privateRows.find((row) => row.id === originalId);
+  if (!original) throw unknown("private row " + originalId + " is absent; refusing a replacement shared append");
+  try {
+    await commonsInit();
+    const reconciled = await appendSharedCas({
+      read: (signal) => cGetMeta(sharedKey(AGENT), signal),
+      write: (body, etag, signal) => cPutCond(sharedKey(AGENT), body, etag, signal),
+      entry: original, agent: AGENT, callerLane: AGENT, attempts: 2,
+    });
+    if (reconciled?.durability === "UNKNOWN") throw unknown(reconciled.reason);
+  } catch (error) {
+    if (error?.durability === "UNKNOWN") throw error;
+    throw unknown("cannot reconcile shared row " + originalId + ": " + String(error));
+  }
+  appendReconciliationReceipt(AGENT, originalId, intentHash, { cacheDir: CACHE_DIR });
+  return { rows: privateRows, entry: original, shared: true };
 }
 async function readSharedAll() {
   await commonsInit();
@@ -584,24 +640,20 @@ async function append(type, share) {
   const supersedes = CROSS ? undefined : (SUPERSEDES || undefined);
   const wantsShared = (share || type === "status") && !NO_SHARE.has(AGENT);
   const intent = { command: type, text: TEXT, tags: TAGS, source: SOURCE, was: WAS, supersedes: SUPERSEDES, target: ON, share: wantsShared };
-  if (IDEMPOTENCY_KEY) {
-    ACTIVE_OPERATION = stageOperation({
-      agent: AGENT, callerLane: AGENT, targetLane: ON, idempotencyKey: IDEMPOTENCY_KEY,
-      intent, wantsShared,
-    });
+  ACTIVE_RECONCILIATION_INTENT_HASH = operationIntentHash(intent);
+  const reconciled = await reconcileUnknownSharedWrite(intent);
+  if (reconciled) {
+    writeCacheRows(KEYBASE, reconciled.rows);
+    maybeIndex(reconciled.entry, true);
+    emitFleet(reconciled.entry, true);
+    console.log(`[kb-memory] ${type} reconciled original id=${reconciled.entry.id}; private and shared records retained without a replacement append.`);
+    return;
   }
   const buildEntry = (freshRows) => {
     if (!supersedes) writeAdvisory(TEXT, freshRows, type);
     return { id: newId(freshRows), ts: new Date().toISOString(), type, text: TEXT, tags: TAGS, by: AGENT, source: SOURCE || undefined, was: WAS || undefined, supersedes };
   };
-  let rows, entry, shared = false;
-  if (IDEMPOTENCY_KEY) {
-    ({ rows, entry, shared } = await commitKeyedAppend(buildEntry, intent, wantsShared));
-    if ((share || type === "status") && NO_SHARE.has(AGENT)) await publishShared(AGENT, entry);
-  } else {
-    ({ rows, entry } = await commitAppend(buildEntry));
-    if (share || type === "status") shared = await publishShared(AGENT, entry);
-  }
+  const { rows, entry, shared } = await commitKeyedAppend(buildEntry, intent, wantsShared);
   maybeIndex(entry, shared);
   emitFleet(entry, shared);
   if (CROSS) console.log(`[kb-memory] ${type} BY ${AGENT} -> ON ${ON}'s ledger (${A.ring}) id=${entry.id} [cross-lane note, append-only, no-supersede]. ${ON} ledger now ${rows.length} entries; ${ON} sees it on next wake/reconcile.`);
@@ -1167,15 +1219,32 @@ async function runPack() {
   const WRITE_VERBS = new Set(["remember", "fact", "decision", "pitfall", "status", "correct"]);
   if (AGENT && TEXT && WRITE_VERBS.has(cmd)) {
     const item = { type: cmd, text: TEXT, share: SHARE || cmd === "status", tags: ["mem-direct-fallback"] };
+    // A non-keyed shared append can be accepted by the object store while its response is lost.
+    // The original row ID is the only safe reconciliation handle. Do not turn that uncertainty into
+    // a fresh append by telling the caller to repeat the command.
+    const reconciliationEntryId = e?.durability === "UNKNOWN" &&
+      validReconciliationEntryId(e?.entry?.id)
+      ? e.entry.id : null;
     if (cmd === "correct" && WAS) item.was = WAS;
     if (CROSS) item.on = ON;
     if (IDEMPOTENCY_KEY) item.idempotency_key = IDEMPOTENCY_KEY;
+    if (reconciliationEntryId) {
+      item.shared_durability = "UNKNOWN";
+      item.reconciliation_lane = e?.reconciliation_lane || "shared";
+      item.reconciliation_entry_id = reconciliationEntryId;
+      item.reconciliation_intent_hash = e?.reconciliation_intent_hash || ACTIVE_RECONCILIATION_INTENT_HASH;
+    }
     if (ACTIVE_OPERATION) {
       item.operation_id = ACTIVE_OPERATION.operation_id; item.operation_stage = ACTIVE_OPERATION.stage;
       item.intent_hash = ACTIVE_OPERATION.intent_hash; item.private_entry_id = ACTIVE_OPERATION.private_entry_id;
+      item.idempotency_key = ACTIVE_OPERATION.idempotency_key;
     }
     appendFailedWriteFallback(AGENT, item, safeMessage, "mem.mjs", { cacheDir: CACHE_DIR });
-    console.error(`[kb-memory] NOT LOST: saved to the local fallback (${FAILED_WRITE_FILE(AGENT, CACHE_DIR)}). Re-run this same command once credentials are restored, or recover the file by hand.`);
+    if (reconciliationEntryId) {
+      console.error(`[kb-memory] ${item.reconciliation_lane.toUpperCase()} DURABILITY UNKNOWN: saved reconciliation metadata to ${FAILED_WRITE_FILE(AGENT, CACHE_DIR)}. Do not issue a fresh replacement write. Re-run this same invocation only after the store recovers; its durable operation will reconcile original entry id=${reconciliationEntryId} before any append.`);
+    } else {
+      console.error(`[kb-memory] NOT LOST: saved to the local fallback (${FAILED_WRITE_FILE(AGENT, CACHE_DIR)}). Re-run this same command once credentials are restored, or recover the file by hand.`);
+    }
   }
   process.exit(1);
 });

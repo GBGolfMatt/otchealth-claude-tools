@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  advanceOperation, completeOperation, operationIdentity, operationOutboxFile, stageOperation,
+  advanceOperation, completeOperation, operationIdentity, operationOutboxFile, releaseOperation, stageOperation,
 } from "../operation-outbox.mjs";
 import { commitKeyedMemoryWrite } from "../keyed-memory-write.mjs";
 
@@ -45,6 +45,44 @@ test("outbox is content-free, monotonic from disk, and clears only after durable
     const sharedStored = advanceOperation(privateStored, "shared_stored", { shared_entry_id: "private-original" });
     completeOperation(sharedStored);
     assert.equal(existsSync(operationOutboxFile("cto", staged.operation_id, home)), false);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("an unkeyed pending operation reuses only its exact lane and intent, then releases that identity after completion", async () => {
+  const home = await mkdtemp(join(tmpdir(), "memory-auto-outbox-"));
+  const intent = { type: "fact", text: "synthetic unkeyed recovery", share: false };
+  try {
+    const first = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home });
+    assert.equal(first.auto_generated_key, true);
+    releaseOperation(first);
+    const replay = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home });
+    assert.equal(replay.idempotency_key, first.idempotency_key, "an exact restart must retain the pending operation identity");
+    releaseOperation(replay);
+    const otherLane = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "coo", intent, wantsShared: false, home });
+    assert.notEqual(otherLane.idempotency_key, first.idempotency_key, "an operation cannot replay across target lanes");
+    releaseOperation(otherLane);
+    const otherIntent = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent: { ...intent, text: "different synthetic intent" }, wantsShared: false, home });
+    assert.notEqual(otherIntent.idempotency_key, first.idempotency_key, "an operation cannot replay a different intent");
+    releaseOperation(otherIntent);
+    completeOperation(advanceOperation(stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home }), "private_stored", { private_entry_id: "original" }));
+    const later = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home });
+    assert.notEqual(later.idempotency_key, first.idempotency_key, "a completed operation must not deduplicate a later intentional write");
+    completeOperation(advanceOperation(later, "private_stored", { private_entry_id: "later" }));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("an explicit key cannot be replayed with a different intent", async () => {
+  const home = await mkdtemp(join(tmpdir(), "memory-explicit-conflict-"));
+  try {
+    const first = stageOperation({
+      agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "intent-conflict-001",
+      intent: { type: "fact", text: "first synthetic intent" }, wantsShared: false, home,
+    });
+    releaseOperation(first);
+    assert.throws(() => stageOperation({
+      agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "intent-conflict-001",
+      intent: { type: "fact", text: "changed synthetic intent" }, wantsShared: false, home,
+    }), /intent differs/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
