@@ -97,11 +97,11 @@ function applyMutation(state, receipt, mutation) {
   return next;
 }
 
-function makeReceipt({ operationId, agent, expectedVersion, expectedEtag, attempt, intentHash, mutation, now }) {
+function makeReceipt({ operationId, agent, expectedVersion, expectedEtag, attempt, intentHash, mutation, appliedAt }) {
   return Object.freeze({
     version: 1, operation_id: operationId, agent, expected_version: expectedVersion,
     expected_etag_hash: etagHash(expectedEtag), attempt, mutation_hash: intentHash,
-    applied_at: now(), updated_by: mutation.updated_by,
+    applied_at: appliedAt, updated_by: mutation.updated_by,
   });
 }
 
@@ -138,6 +138,9 @@ export async function commitStateMutation({
   const intentHash = digest(intent);
   const deadlineAt = Date.now() + deadlineMs;
   let currentReceipt = receipt ? Object.freeze(copy(receipt)) : null;
+  // A conditional conflict proves that a particular attempt was not stored, but it does not create
+  // a new logical mutation. Keep one operation timestamp across every such retry.
+  let appliedAt = currentReceipt?.applied_at || null;
   if (currentReceipt && (!receiptShape(currentReceipt) || currentReceipt.agent !== agent ||
       currentReceipt.operation_id !== operationId || currentReceipt.mutation_hash !== intentHash ||
       currentReceipt.updated_by !== intent.updated_by)) {
@@ -171,7 +174,8 @@ export async function commitStateMutation({
         throw new StateMutationUnknownError("state mutation durability cannot be proven against newer state", currentReceipt);
       }
     } else {
-      currentReceipt = makeReceipt({ operationId, agent, expectedVersion: currentVersion, expectedEtag: snapshot.etag, attempt: attempt + 1, intentHash, mutation: intent, now });
+      appliedAt ||= now();
+      currentReceipt = makeReceipt({ operationId, agent, expectedVersion: currentVersion, expectedEtag: snapshot.etag, attempt: attempt + 1, intentHash, mutation: intent, appliedAt });
     }
     if (currentReceipt && (currentVersion !== currentReceipt.expected_version || etagHash(snapshot.etag) !== currentReceipt.expected_etag_hash)) {
       throw new StateMutationUnknownError("state mutation durability cannot be proven against a changed state version or ETag", currentReceipt);

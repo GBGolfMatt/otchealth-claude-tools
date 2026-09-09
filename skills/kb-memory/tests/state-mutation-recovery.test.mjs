@@ -187,6 +187,32 @@ test("a failing or timed-out receipt persistence callback prevents every write",
   }
 });
 
+test("a definitive conditional conflict keeps one pinned timestamp across retry receipts", async () => {
+  const remote = store();
+  const prepared = [];
+  const clocks = ["2026-09-09T00:00:00.000Z", "2026-09-09T00:01:00.000Z"];
+  let firstWrite = true;
+  const result = await commitStateMutation({
+    agent: "cto", operationId: "state-pinned-conflict-001", mutation: setGoal("after conflict"),
+    now: () => clocks.shift(), read: remote.read,
+    onReceipt: async (receipt) => { prepared.push(structuredClone(receipt)); },
+    write: async (candidate, etag) => {
+      if (firstWrite) {
+        firstWrite = false;
+        await commitStateMutation({ agent: "cto", operationId: "state-conflict-other-001", mutation: { kind: "set", fields: { last_state: "other" }, updated_by: "cli" }, ...remote });
+      }
+      return remote.write(candidate, etag);
+    },
+  });
+  assert.equal(prepared.length, 2);
+  assert.equal(prepared[0].attempt, 1);
+  assert.equal(prepared[1].attempt, 2);
+  assert.equal(prepared[0].applied_at, "2026-09-09T00:00:00.000Z");
+  assert.equal(prepared[1].applied_at, prepared[0].applied_at);
+  assert.equal(result.receipt.applied_at, prepared[0].applied_at);
+  assert.equal(result.state.updated_at, prepared[0].applied_at);
+});
+
 test("conditional conflicts preserve disjoint fields and retain immutable receipts", async () => {
   const remote = store();
   let firstRead = true;
