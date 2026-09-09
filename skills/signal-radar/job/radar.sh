@@ -3,7 +3,7 @@
 # high-precision signals and, above threshold, persists + dispatches to the owning agent's inbox.
 # Report/observe only; never acts on prod. Tier-1 autonomy (Azure cron, ZERO Max-plan draw). One
 # secret: the claude-driver SA self-resolves every Azure/PostHog/Sentry key from Secret Manager.
-# Fail-open by design (radar.mjs always exits 0 on an internal error).
+# Persistence or dispatch uncertainty exits non-zero so the scheduler surfaces actionable recovery.
 set -e
 [ -n "$GCP_CLAUDE_DRIVER_SA_JSON_B64" ] && export GCP_CLAUDE_DRIVER_SA_JSON=$(printf "%s" "$GCP_CLAUDE_DRIVER_SA_JSON_B64" | base64 -d)
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"

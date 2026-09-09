@@ -17,14 +17,14 @@
 //   - MNPI (INND/securities/Xero/Plaid/stock) signals are hard-routed to owner=cfo and NEVER appear in
 //     a fleet-wide digest, regardless of what a detector's OWNER constant says.
 //   - PHI (MedReview) is never a data source; detectors that touch Sentry hard-exclude those projects.
-//   - Fail-open: one detector throwing NEVER aborts the scan or crashes the process (exit 0 always,
-//     except a bad CLI usage which exits 2).
+//   - One detector throwing never aborts the scan, but durable persistence or dispatch uncertainty
+//     exits non-zero so the scheduler can surface an actionable recovery.
 //   - Cooldown + consecutive-escalate (schema.shouldFire) stop a flapping metric from spamming an inbox.
 import { execFileSync } from "node:child_process";
 import { closeConnection } from "../kb-memory/pg-state.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, posthogEmit } from "./common.mjs";
+import { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, cosmosReadSignal, cosmosReplaceSignal, cosmosQueryDispatchSignals, posthogEmit } from "./common.mjs";
 import { shouldFire, isMnpiSubject, SEVERITY_RANK } from "./schema.mjs";
 
 import * as sentryErrorSpike from "./detectors/sentry-error-spike.mjs";
@@ -71,6 +71,29 @@ function defaultDispatch(owner, text) {
   execFileSync("node", [DISPATCH_PATH, "send", owner, text, "--from", "signal-radar"], { stdio: ["ignore", "pipe", "pipe"] });
 }
 
+const dispatchText = (s) => `[signal-radar] ${s.severity.toUpperCase()} ${s.detector}: ${s.why} Action: ${s.suggested_action}`;
+
+/** A dispatch has no downstream idempotency key or authoritative readback. Claim it with CAS before
+ * invoking the writer, then leave any interrupted/failed attempt ambiguous rather than retrying it. */
+async function deliverPending(io, dispatch, signal, now) {
+  const current = await io.cosmosReadSignal(signal.owner, signal.id);
+  if (!current || current.doc.dispatch_state !== "pending") return { status: "unresolved", id: signal.id, reason: "pending record changed or disappeared" };
+  const claim = { ...current.doc, dispatch_state: "dispatching", dispatch_started_at: new Date(now).toISOString() };
+  const claimed = await io.cosmosReplaceSignal(signal.owner, signal.id, claim, current.etag);
+  if (!claimed?.ok) return { status: "unresolved", id: signal.id, reason: "dispatch claim conflicted" };
+  try {
+    await dispatch(signal.owner, dispatchText(signal));
+  } catch (error) {
+    const ambiguous = { ...claim, dispatch_state: "ambiguous", dispatch_error: String(error?.message || error) };
+    await io.cosmosReplaceSignal(signal.owner, signal.id, ambiguous, claimed.etag);
+    return { status: "ambiguous", id: signal.id, reason: "dispatch response was not confirmed; inspect inbox before retrying" };
+  }
+  const sent = { ...claim, dispatch_state: "sent", dispatched_at: new Date(now).toISOString() };
+  const recorded = await io.cosmosReplaceSignal(signal.owner, signal.id, sent, claimed.etag);
+  if (!recorded?.ok) return { status: "ambiguous", id: signal.id, reason: "dispatch may have succeeded but sent receipt was not persisted" };
+  return { status: "sent", id: signal.id };
+}
+
 /**
  * The whole scan: run every detector, classify + cooldown-gate the findings, and (with emitting=true)
  * persist + dispatch. Exported and parameterized (io/dispatch/detectors/now all injectable, defaulting
@@ -87,10 +110,11 @@ export async function runScan(opts = {}) {
     only = "",
     emitting = false,
     asJson = false,
-    io = { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, posthogEmit },
+    io = { cosmosConfig, cosmosPutSignal, cosmosQuerySignals, cosmosReadSignal, cosmosReplaceSignal, cosmosQueryDispatchSignals, posthogEmit },
     dispatch = defaultDispatch,
     detectors = DETECTORS,
     now = Date.now(),
+    beforeDispatch = null,
   } = opts;
   const targets = only ? detectors.filter((d) => d.NAME === only) : detectors;
   if (only && !targets.length) { console.error(`unknown detector "${only}". known: ${detectors.map((d) => d.NAME).join(", ")}`); process.exit(2); }
@@ -165,7 +189,19 @@ export async function runScan(opts = {}) {
   }
 
   const dispatched = [];
+  const unresolved = [];
   let persisted = 0;
+  const durable = typeof io.cosmosReadSignal === "function" && typeof io.cosmosReplaceSignal === "function" && typeof io.cosmosQueryDispatchSignals === "function";
+  if (durable) {
+    for (const state of ["pending", "dispatching", "ambiguous"]) {
+      const rows = await io.cosmosQueryDispatchSignals(state);
+      for (const s of rows) {
+        if (state !== "pending") { unresolved.push({ id: s.id, state, reason: "dispatch outcome is ambiguous; inspect inbox before retrying" }); continue; }
+        const outcome = await deliverPending(io, dispatch, s, now);
+        if (outcome.status === "sent") dispatched.push(s.id); else unresolved.push(outcome);
+      }
+    }
+  }
   for (const d of firing) {
     const s = d.signal;
     // 2026-08-18: this catch used to be the ONLY trace of a persist failure (a `[warn]` line), while
@@ -176,14 +212,28 @@ export async function runScan(opts = {}) {
     // ZERO signals reporting one persisted, silently, every 30 minutes. `persisted` now counts only
     // writes that actually returned success, so the summary line -- and any --json/dispatch consumer
     // reading it -- reflects what happened, not what was attempted.
+    let persistedThisSignal = false;
     try {
-      const put = await io.cosmosPutSignal({ id: s.id, owner: s.owner, ...s, escalate: d.escalate, consecutive: d.consecutive });
+      if (durable) {
+        const existing = await io.cosmosReadSignal(s.owner, s.id);
+        if (["dispatching", "ambiguous"].includes(existing?.doc?.dispatch_state)) {
+          unresolved.push({ id: s.id, state: existing.doc.dispatch_state, reason: "existing dispatch outcome is ambiguous; inspect inbox before retrying" });
+          continue;
+        }
+      }
+      const needsDispatch = s.severity === "high" || d.escalate;
+      const put = await io.cosmosPutSignal({ id: s.id, owner: s.owner, ...s, escalate: d.escalate, consecutive: d.consecutive, dispatch_state: needsDispatch ? "pending" : "not_required" });
       // cosmosPutSignal reports "not-configured" as a value, not a throw; a write that did not happen
       // must never count as persisted, whichever way it says so.
       if (put && put.ok === false) throw new Error(`put refused: ${put.reason || "unknown"}`);
       persisted++;
+      persistedThisSignal = true;
     }
     catch (e) { console.error(`  [warn] could not persist signal ${s.id}: ${e.message}`); }
+
+    // Dispatch must be causally downstream of a confirmed durable record. A failed write is already
+    // a non-zero outcome below, and must never still page an owner with an unjournaled signal.
+    if (!persistedThisSignal) continue;
 
     await io.posthogEmit("signal_detected", s.owner, { detector: s.detector, subject: s.subject, severity: s.severity, mnpi: s.mnpi, escalate: d.escalate, consecutive: d.consecutive });
 
@@ -192,7 +242,13 @@ export async function runScan(opts = {}) {
     // company-brain to query, not pushed into an inbox) - this is the never-cry-wolf discipline applied
     // to routing, not just cooldown.
     if (s.severity === "high" || d.escalate) {
-      const text = `[signal-radar] ${s.severity.toUpperCase()} ${s.detector}: ${s.why} Action: ${s.suggested_action}`;
+      if (beforeDispatch) await beforeDispatch(s);
+      if (durable) {
+        const outcome = await deliverPending(io, dispatch, s, now);
+        if (outcome.status === "sent") dispatched.push(s.id); else unresolved.push(outcome);
+        continue;
+      }
+      const text = dispatchText(s);
       try {
         await dispatch(s.owner, text);
         dispatched.push(s.id);
@@ -211,9 +267,9 @@ export async function runScan(opts = {}) {
   // write still failed (unreachable/permission/auth), the second half of "unconfigured or unreachable"
   // this whole change exists to make loud. Only firing.length > 0 can trip this -- a quiet fleet with
   // nothing to persist is a genuine, honest success, not this failure class.
-  if (persisted < firing.length) process.exitCode = 1;
+  if (persisted < firing.length || unresolved.length) process.exitCode = 1;
 
-  return { firing: firing.map((d) => d.signal), configured: true, persisted, dispatched };
+  return { firing: firing.map((d) => d.signal), configured: true, persisted, dispatched, unresolved };
 }
 
 async function scan() {
@@ -226,7 +282,7 @@ if (isMain) {
     try {
       if (cmd === "scan") await scan();
       else { console.error("usage: radar.mjs scan [--emit] [--json] [--only <detector-name>]"); process.exit(2); }
-    } catch (e) { console.error("signal-radar ERROR: " + e.message); process.exitCode = 0; } // preserve the existing fail-open policy
+    } catch (e) { console.error("signal-radar ERROR: " + e.message); process.exitCode = 1; }
     finally {
       try { await closeConnection(); }
       catch { console.error("[signal-radar] state connection cleanup failed"); process.exitCode = 1; }

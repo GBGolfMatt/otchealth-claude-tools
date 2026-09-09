@@ -190,3 +190,58 @@ test("runScan(): a quiet fleet (nothing fires) with --emit and the store configu
     process.exitCode = savedExitCode;
   }
 });
+
+function durableIo() {
+  const docs = new Map(); let version = 0;
+  return {
+    docs,
+    cosmosConfig: async () => ({ backend: "postgres" }),
+    cosmosQuerySignals: async () => [],
+    posthogEmit: async () => true,
+    cosmosPutSignal: async (doc) => { docs.set(`${doc.owner}/${doc.id}`, { doc, etag: String(++version) }); return { ok: true }; },
+    cosmosReadSignal: async (owner, id) => docs.get(`${owner}/${id}`) || null,
+    cosmosReplaceSignal: async (owner, id, doc, etag) => {
+      const key = `${owner}/${id}`, current = docs.get(key);
+      if (!current || current.etag !== etag) return { ok: false, status: 412 };
+      const next = { doc, etag: String(++version) }; docs.set(key, next); return { ok: true, etag: next.etag };
+    },
+    cosmosQueryDispatchSignals: async (state) => [...docs.values()].map((x) => x.doc).filter((doc) => doc.dispatch_state === state),
+  };
+}
+
+test("runScan(): a crash after durable pending persistence replays once on the next scan", async () => {
+  const io = durableIo(); const calls = [];
+  const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "crash-pending", severity: "high", why: "x", suggested_action: "y" });
+  await assert.rejects(() => runScan({ emitting: true, detectors: [firingDetector(signal)], io, dispatch: async () => calls.push("send"), beforeDispatch: async () => { throw new Error("synthetic process crash"); } }));
+  assert.equal(io.docs.get(`cto/${signal.id}`).doc.dispatch_state, "pending");
+  const replay = await runScan({ emitting: true, detectors: [{ NAME: "quiet", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }], io, dispatch: async () => calls.push("send") });
+  assert.deepEqual(replay.dispatched, [signal.id]);
+  assert.deepEqual(calls, ["send"]);
+  assert.equal(io.docs.get(`cto/${signal.id}`).doc.dispatch_state, "sent");
+});
+
+test("runScan(): accepted-but-response-lost dispatch remains ambiguous and is never blindly replayed", async () => {
+  const savedExitCode = process.exitCode; const io = durableIo(); const calls = [];
+  try {
+    const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "lost-response", severity: "high", why: "x", suggested_action: "y" });
+    await runScan({ emitting: true, detectors: [firingDetector(signal)], io, dispatch: async () => { calls.push("accepted"); throw new Error("response lost"); } });
+    assert.equal(io.docs.get(`cto/${signal.id}`).doc.dispatch_state, "ambiguous");
+    const replay = await runScan({ emitting: true, detectors: [{ NAME: "quiet", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }], io, dispatch: async () => calls.push("retry") });
+    assert.equal(calls.filter((x) => x === "retry").length, 0);
+    assert.equal(replay.unresolved.length, 1);
+    assert.equal(process.exitCode, 1);
+  } finally { process.exitCode = savedExitCode; }
+});
+
+test("runScan(): a conditional claim conflict fails loud without dispatching", async () => {
+  const savedExitCode = process.exitCode; const io = durableIo(); const calls = [];
+  const originalReplace = io.cosmosReplaceSignal;
+  io.cosmosReplaceSignal = async () => ({ ok: false, status: 412 });
+  try {
+    const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "claim-conflict", severity: "high", why: "x", suggested_action: "y" });
+    const result = await runScan({ emitting: true, detectors: [firingDetector(signal)], io, dispatch: async () => calls.push("send") });
+    assert.equal(calls.length, 0);
+    assert.equal(result.unresolved.length, 1);
+    assert.equal(process.exitCode, 1);
+  } finally { io.cosmosReplaceSignal = originalReplace; process.exitCode = savedExitCode; }
+});
