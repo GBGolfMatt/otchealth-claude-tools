@@ -190,13 +190,11 @@ test("distill(): a non-JSON / non-array response is treated as an LLM failure, n
   assert.ok(notAnArray.llmError instanceof Error, "a bare JSON object (not wrapped in []) must also be a reported failure");
 });
 
-test("main()'s wiring: the FAIL LOUD message format matches the required distinct wording, and both exits it controls are llmError-conditional (non-literal)", async () => {
+test("main()'s wiring: LLM failure and unconfirmed state sync both exit non-zero without changing skip exits", async () => {
   const src = await readFile(new URL("../reflect.mjs", import.meta.url), "utf8");
   assert.match(src, /LLM call FAILED \(provider=\$\{LLM_PROVIDER\}\)/, "the stderr message must name the failure and the active provider");
   assert.match(src, /NOT the same as 'no lessons'/, "the message must explicitly disclaim the legitimate-empty outcome");
-  const exitCount = (src.match(/process\.exit\(llmError \? 1 : 0\)/g) || []).length;
-  assert.equal(exitCount, 2, "both the early empty-items return and the end-of-run exit must key off llmError, not a bare literal");
-  // Counterfactual: if a future edit regressed this back to a bare literal (e.g. `process.exit(0)`)
-  // on either of those two lines, this exact assertion is what would catch it -- a plain "exits 0
-  // somewhere" search would not.
+  assert.match(src, /process\.exit\(llmError \? 1 : 0\)/, "the early no-items exit must remain LLM-aware");
+  assert.match(src, /stateSyncFailed = true/, "a failed state-sync must not look like completed reflection");
+  assert.match(src, /process\.exit\(llmError \|\| stateSyncFailed \? 1 : 0\)/, "the final exit must expose unconfirmed state durability");
 });

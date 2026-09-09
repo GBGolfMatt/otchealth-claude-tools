@@ -27,11 +27,15 @@ globalThis.fetch = async (input, options = {}) => {
   }
   if (method === "GET") {
     const shared = url.pathname.includes("/_MEMORY/_exec/");
+    const stateDocument = !shared && url.pathname.endsWith("/_STATE/cto.json");
     if (state.fail_shared_read && state.shared_put_accepted && shared) {
       return new Response("synthetic shared read refusal", { status: 418 });
     }
     if (state.fail_private_read && state.private_put_accepted && !shared && url.pathname.endsWith("/_MEMORY/cto.jsonl")) {
       return new Response("synthetic private read refusal", { status: 418 });
+    }
+    if (state.fail_state_read && state.state_put_accepted && stateDocument) {
+      return new Response("synthetic state read refusal", { status: 418 });
     }
     const stored = state.objects[key];
     if (!stored) return new Response("", { status: 404 });
@@ -45,13 +49,18 @@ globalThis.fetch = async (input, options = {}) => {
     state.objects[key] = { body: String(options.body || ""), etag, version: prior ? Number(prior.version) + 1 : 1 };
     const shared = url.pathname.includes("/_MEMORY/_exec/");
     const privateLedger = !shared && url.pathname.endsWith("/_MEMORY/cto.jsonl");
+    const stateDocument = !shared && url.pathname.endsWith("/_STATE/cto.json");
     if (state.lose_shared_put && shared) state.shared_put_accepted = true;
     if (state.lose_private_put && privateLedger) state.private_put_accepted = true;
+    if (state.lose_state_put && stateDocument) state.state_put_accepted = true;
+    if (state.crash_state_put && stateDocument) state.state_put_accepted = true;
     save(state);
     if (state.lose_shared_put && shared) {
       throw new TypeError("synthetic response lost after accepted shared PUT");
     }
     if (state.lose_private_put && privateLedger) throw new TypeError("synthetic response lost after accepted private PUT");
+    if (state.lose_state_put && stateDocument) throw new TypeError("synthetic response lost after accepted state PUT");
+    if (state.crash_state_put && stateDocument) process.exit(86);
     return new Response("", { status: 201, headers: { etag } });
   }
   throw new Error("unexpected synthetic method " + method);
@@ -272,6 +281,117 @@ test("actual entity write rejects a changed intent under an explicit operation k
     const privateRows = rows(conflict.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl");
     assert.equal(privateRows.length, 1);
     assert.equal(privateRows[0].evalue, "first value");
+  } finally {
+    rmSync(first.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+function stateDocument(store) {
+  const object = store.objects[S3_HOST + "/otchealthcommons/company-journal/_STATE/cto.json"];
+  assert.ok(object, "synthetic state object must exist");
+  return JSON.parse(object.body);
+}
+
+function stateOutbox(cacheDir) {
+  const directory = join(cacheDir, "_write-outbox-cto");
+  return existsSync(directory) ? readdirSync(directory).filter((name) => name.endsWith(".json") || name.endsWith(".lock")) : [];
+}
+
+test("actual state CLI recovers an accepted response loss after a later state write without overwriting it", () => {
+  const firstArgs = ["state", "--set", "--goal", "synthetic initial goal", "--agent", "cto"];
+  const first = runMem(firstArgs, { lose_state_put: true });
+  try {
+    assert.equal(first.result.status, 1, first.result.stderr);
+    assert.match(first.result.stderr, /STATE DURABILITY UNKNOWN/);
+    const afterLoss = stateDocument(first.store);
+    assert.equal(afterLoss.goal, "synthetic initial goal");
+    assert.equal(afterLoss.state_mutation_receipts.length, 1);
+    const pending = stateOutbox(first.cacheDir);
+    assert.equal(pending.filter((name) => name.endsWith(".json")).length, 1);
+    const pendingRecord = JSON.parse(readFileSync(join(first.cacheDir, "_write-outbox-cto", pending.find((name) => name.endsWith(".json"))), "utf8"));
+    assert.match(pendingRecord.operation_id, /^[a-f0-9]{64}$/);
+    assert.equal(pendingRecord.stage, "staged");
+    assert.equal(pendingRecord.state_receipt.operation_id, pendingRecord.operation_id);
+
+    const later = runMem(["state", "--set", "--last", "synthetic later state", "--agent", "cto"], { lose_state_put: false }, first);
+    assert.equal(later.result.status, 0, later.result.stderr);
+    assert.equal(stateDocument(later.store).last_state, "synthetic later state");
+
+    const replay = runMem(firstArgs, { lose_state_put: false }, later);
+    assert.equal(replay.result.status, 0, replay.result.stderr);
+    const recovered = stateDocument(replay.store);
+    assert.equal(recovered.goal, "synthetic initial goal");
+    assert.equal(recovered.last_state, "synthetic later state");
+    assert.equal(recovered.version, 2);
+    assert.equal(recovered.state_mutation_receipts.length, 2);
+    assert.deepEqual(stateOutbox(replay.cacheDir), [], "recovered state operation must clear its outbox only after proof");
+  } finally {
+    rmSync(first.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("actual state-sync CLI retains its source and session-bound operation across accepted response loss", () => {
+  const args = ["state-sync", "--agent", "cto", "--facts", '["Synthetic first fact","Synthetic second fact"]', "--source", "stop", "--session-id", "synthetic-session-001"];
+  const first = runMem(args, { lose_state_put: true });
+  try {
+    assert.equal(first.result.status, 1, first.result.stderr);
+    assert.match(first.result.stderr, /STATE DURABILITY UNKNOWN/);
+    const pendingName = stateOutbox(first.cacheDir).find((name) => name.endsWith(".json"));
+    const pending = JSON.parse(readFileSync(join(first.cacheDir, "_write-outbox-cto", pendingName), "utf8"));
+    assert.equal(pending.intent_hash, operationIntentHash({
+      protocol: "state-mutation-cli-v1", agent: "cto", target: "cto",
+      mutation: { kind: "sync", facts: ["Synthetic first fact", "Synthetic second fact"], source: "stop", session_id: "synthetic-session-001", updated_by: "hook:stop" },
+    }));
+    assert.equal(pending.state_receipt.operation_id, pending.operation_id);
+    const replay = runMem(args, { lose_state_put: false }, first);
+    assert.equal(replay.result.status, 0, replay.result.stderr);
+    const state = stateDocument(replay.store);
+    assert.deepEqual(state.session_facts, ["Synthetic second fact", "Synthetic first fact"]);
+    assert.deepEqual(state.checkpoint, { as_of: state.updated_at, source: "stop", session_id: "synthetic-session-001" });
+    assert.equal(state.version, 1, "recovery must prove the accepted write rather than append another state mutation");
+    assert.deepEqual(stateOutbox(replay.cacheDir), []);
+  } finally {
+    rmSync(first.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("actual state CLI survives process loss after accepted PUT by recovering the pre-write receipt", () => {
+  const args = ["state", "--set", "--goal", "synthetic process-loss goal", "--agent", "cto"];
+  const first = runMem(args, { crash_state_put: true });
+  try {
+    assert.equal(first.result.status, 86, first.result.stderr);
+    assert.equal(stateDocument(first.store).goal, "synthetic process-loss goal");
+    const pendingName = stateOutbox(first.cacheDir).find((name) => name.endsWith(".json"));
+    assert.ok(pendingName, "process loss must retain the pre-write operation record");
+    const pending = JSON.parse(readFileSync(join(first.cacheDir, "_write-outbox-cto", pendingName), "utf8"));
+    assert.equal(pending.stage, "staged");
+    assert.equal(pending.state_receipt.operation_id, pending.operation_id);
+    assert.match(pending.state_receipt.expected_etag_hash, /^[a-f0-9]{64}$/);
+
+    const replay = runMem(args, { crash_state_put: false }, first);
+    assert.equal(replay.result.status, 0, replay.result.stderr);
+    const recovered = stateDocument(replay.store);
+    assert.equal(recovered.goal, "synthetic process-loss goal");
+    assert.equal(recovered.version, 1, "fresh process must prove original acceptance instead of writing replacement state");
+    assert.deepEqual(stateOutbox(replay.cacheDir), []);
+  } finally {
+    rmSync(first.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("actual state CLI rejects a changed pending intent under its explicit operation key", () => {
+  const firstArgs = ["state", "--set", "--goal", "synthetic first intent", "--agent", "cto", "--idempotency-key", "state-intent-key-001"];
+  const first = runMem(firstArgs, { lose_state_put: true });
+  try {
+    assert.equal(first.result.status, 1, first.result.stderr);
+    const changed = runMem(["state", "--set", "--goal", "synthetic changed intent", "--agent", "cto", "--idempotency-key", "state-intent-key-001"], { lose_state_put: false }, first);
+    assert.equal(changed.result.status, 1, changed.result.stderr);
+    assert.match(changed.result.stderr, /idempotency key conflict/);
+    assert.equal(stateDocument(changed.store).goal, "synthetic first intent");
+    const replay = runMem(firstArgs, { lose_state_put: false }, changed);
+    assert.equal(replay.result.status, 0, replay.result.stderr);
+    assert.equal(stateDocument(replay.store).goal, "synthetic first intent");
+    assert.equal(stateDocument(replay.store).version, 1);
   } finally {
     rmSync(first.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }

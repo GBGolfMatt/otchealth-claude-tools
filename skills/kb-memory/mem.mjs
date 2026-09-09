@@ -51,7 +51,8 @@ import { awsCredsPresent } from "./aws-secret.mjs";
 import { FAILED_WRITE_FILE, appendFailedWriteFallback } from "./local-fallback.mjs";
 import { appendReconciliationReceipt } from "./local-fallback.mjs";
 import { commitKeyedMemoryWrite } from "./keyed-memory-write.mjs";
-import { operationIntentHash } from "./operation-outbox.mjs";
+import { operationIntentHash, stageOperation, advanceOperation, completeOperation, releaseOperation } from "./operation-outbox.mjs";
+import { StateMutationUnknownError, commitStateMutation, stateMutationIntent, stateMutationIntentHash } from "./state-mutation-recovery.mjs";
 import { redactSecrets } from "./redact.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url)); // for spawning sibling scripts (index-one.mjs)
 
@@ -541,6 +542,61 @@ function readCacheRows(kb) { try { return fromNdjson(readFileSync(cacheFile(kb),
 function writeTeamCache(rows) { try { mkdirSync(CACHE_DIR, { recursive: true }); writeFileSync(TEAM_CACHE, toNdjson(rows)); } catch {} }
 function readTeamCache() { try { return fromNdjson(readFileSync(TEAM_CACHE, "utf8")); } catch { return null; } }
 function ageMs(p) { try { return Date.now() - statSync(p).mtimeMs; } catch { return Infinity; } }
+
+// State is a mutable snapshot, so it cannot reuse the append-ledger protocol. It does share the
+// durable operation outbox: the operation identity exists before the first read, and the immutable
+// state receipt is fsync'd into that outbox immediately before the conditional state write. A fresh
+// exact invocation can therefore prove an accepted response-loss without replacing newer state.
+async function commitDurableStateMutation({ stateKey, defaultState, mutation }) {
+  if (CROSS) throw new Error("state mutations require --agent to match their target lane");
+  const canonicalMutation = stateMutationIntent(mutation);
+  const intent = {
+    protocol: "state-mutation-cli-v1", agent: AGENT, target: ON, mutation: canonicalMutation,
+  };
+  let operation = stageOperation({
+    agent: AGENT, callerLane: AGENT, targetLane: ON, idempotencyKey: IDEMPOTENCY_KEY || undefined,
+    intent, wantsShared: false, cacheDir: CACHE_DIR,
+  });
+  ACTIVE_OPERATION = operation;
+  try {
+    const result = await commitStateMutation({
+      agent: AGENT,
+      operationId: operation.operation_id,
+      mutation: canonicalMutation,
+      receipt: operation.state_receipt || null,
+      read: async (signal) => {
+        const { text, etag } = await getTextMeta(stateKey, signal);
+        return { state: text ? JSON.parse(text) : { ...defaultState }, etag };
+      },
+      write: async (candidate, etag, signal) => {
+        const response = await putTextCond(stateKey, JSON.stringify(candidate, null, 2), "application/json", etag, signal);
+        return { ok: response.ok, status: response.status };
+      },
+      // The coordinator awaits this callback after receipt construction and before its first write.
+      // `advanceOperation` is synchronous and fsyncs the replacement record before returning.
+      onReceipt: (receipt) => {
+        operation = advanceOperation(operation, "staged", {
+          state_receipt: receipt,
+          state_mutation_intent_hash: stateMutationIntentHash(canonicalMutation),
+        });
+        ACTIVE_OPERATION = operation;
+      },
+    });
+    operation = advanceOperation(operation, "private_stored", {
+      state_receipt: result.receipt,
+      state_mutation_intent_hash: stateMutationIntentHash(canonicalMutation),
+      state_version: result.state.version,
+    });
+    completeOperation(operation);
+    ACTIVE_OPERATION = null;
+    return result;
+  } catch (error) {
+    try { releaseOperation(operation); } catch {}
+    error.operation = operation;
+    if (error instanceof StateMutationUnknownError) error.state_operation = operation;
+    throw error;
+  }
+}
 
 // ---- READ-SIDE ring wall (defense in depth): when building ONE agent's per-prompt pack, never inject
 //      another lane's sensitive content. clo-personal / NO_SHARE agents do not read the shared feed at
@@ -1150,25 +1206,20 @@ async function runPack() {
       console.log(`updated ${st.updated_at || "never"} by ${st.updated_by || "-"}`);
       return;
     }
-    // --set: read-modify-write with ETag retry. Each field is REPLACED if passed, left as-is otherwise
-    // (so `state --set --last "..."` alone doesn't clobber goal/constraints).
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const { text, etag } = await getTextMeta(STATE_KEY);
-      const st = text ? JSON.parse(text) : { ...DEFAULT_STATE };
-      if (takeVal("--goal", null) !== null) st.goal = takeVal("--goal", "");
-      if (takeVal("--constraints", null) !== null) st.constraints = splitList(takeVal("--constraints", ""));
-      if (takeVal("--decisions", null) !== null) st.open_decisions = splitList(takeVal("--decisions", ""));
-      if (takeVal("--last", null) !== null) st.last_state = takeVal("--last", "");
-      st.updated_at = new Date().toISOString();
-      st.updated_by = process.env.KB_ENGINE || "cli";
-      st.version = (st.version || 0) + 1;
-      const res = await putTextCond(STATE_KEY, JSON.stringify(st, null, 2), "application/json", etag);
-      if (isConflict(res.status)) continue; // someone else wrote between our read and write; retry
-      if (!res.ok) throw new Error(`state --set failed: ${res.status}`);
-      console.log(`[kb-memory] state -> ${AGENT} v${st.version} (goal="${st.goal.slice(0, 60)}")`);
-      return;
-    }
-    throw new Error("state --set: too many concurrent-write conflicts, give up after 4 attempts");
+    // --set replaces only explicitly supplied fields. The coordinator reloads a fresh snapshot for
+    // each conditional conflict, preserving the old field-level semantics without blind retries.
+    const fields = {};
+    if (takeVal("--goal", null) !== null) fields.goal = takeVal("--goal", "");
+    if (takeVal("--constraints", null) !== null) fields.constraints = splitList(takeVal("--constraints", ""));
+    if (takeVal("--decisions", null) !== null) fields.open_decisions = splitList(takeVal("--decisions", ""));
+    if (takeVal("--last", null) !== null) fields.last_state = takeVal("--last", "");
+    const result = await commitDurableStateMutation({
+      stateKey: STATE_KEY,
+      defaultState: DEFAULT_STATE,
+      mutation: { kind: "set", fields, updated_by: process.env.KB_ENGINE || "cli" },
+    });
+    console.log(`[kb-memory] state -> ${AGENT} v${result.state.version} (goal="${String(result.state.goal || "").slice(0, 60)}")${result.recovered ? " [recovered original operation]" : ""}`);
+    return;
   }
   // ── CBP-1 (Checkpoint Bridge Protocol, 2026-07-05): ADDITIVE-ONLY extension of the same
   // _STATE/<agent>.json doc, written by the PreCompact/Stop/periodic hook path (never by hand).
@@ -1183,25 +1234,16 @@ async function runPack() {
     const SESSION_ID = takeVal("--session-id", "");
     let newFacts = [];
     try { const parsed = JSON.parse(takeVal("--facts", "[]") || "[]"); if (Array.isArray(parsed)) newFacts = parsed.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim()); } catch {}
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const { text, etag } = await getTextMeta(STATE_KEY);
-      const st = text ? JSON.parse(text) : { ...DEFAULT_STATE };
-      const existing = Array.isArray(st.session_facts) ? st.session_facts : [];
-      const seen = new Set(existing.map((f) => String(f).slice(0, 64).toLowerCase()));
-      const toAdd = [];
-      for (const f of newFacts) { const k = f.slice(0, 64).toLowerCase(); if (!seen.has(k)) { seen.add(k); toAdd.push(f); } }
-      st.session_facts = [...toAdd.reverse(), ...existing].slice(0, 10); // newest unshifted to front, capped 10
-      st.checkpoint = { as_of: new Date().toISOString(), source: SYNC_SOURCE, session_id: SESSION_ID };
-      st.updated_at = new Date().toISOString();
-      st.updated_by = "hook:" + SYNC_SOURCE;
-      st.version = (st.version || 0) + 1;
-      const res = await putTextCond(STATE_KEY, JSON.stringify(st, null, 2), "application/json", etag);
-      if (isConflict(res.status)) continue; // someone else wrote between our read and write; retry
-      if (!res.ok) throw new Error(`state-sync failed: ${res.status}`);
-      console.log(`[kb-memory] state-sync -> ${AGENT} v${st.version} (source=${SYNC_SOURCE}, facts=${st.session_facts.length})`);
-      return;
-    }
-    throw new Error("state-sync: too many concurrent-write conflicts, give up after 4 attempts");
+    const result = await commitDurableStateMutation({
+      stateKey: STATE_KEY,
+      defaultState: DEFAULT_STATE,
+      mutation: {
+        kind: "sync", facts: newFacts, source: SYNC_SOURCE, session_id: SESSION_ID,
+        updated_by: "hook:" + SYNC_SOURCE,
+      },
+    });
+    console.log(`[kb-memory] state-sync -> ${AGENT} v${result.state.version} (source=${SYNC_SOURCE}, facts=${result.state.session_facts?.length || 0})${result.recovered ? " [recovered original operation]" : ""}`);
+    return;
   }
   console.error("verbs: remember | decision | correct | pitfall | status | entity | recall | tail | team | inbound | reconcile | render | whoami | use | list-agents | state | state-sync\n  cross-lane: add --on <lane> to write on ANOTHER agent's ledger (append-only, attributed by=<--agent>); the owner sees it via 'inbound' / 'tail' on wake and 'reconcile' to ack.\n  state --get [--json] | state --set [--goal \"...\"] [--constraints \"a;b;c\"] [--decisions \"a;b;c\"] [--last \"...\"]  (typed current-state handoff doc)\n  state-sync --agent <a> --facts '[\"...\"]' [--source precompact|stop|periodic] [--session-id <id>]  (CBP-1: additive session_facts + checkpoint, never touches goal/constraints/open_decisions)");
   process.exit(2);
@@ -1213,6 +1255,9 @@ async function runPack() {
   // only values, so the fail-loud diagnosis this path exists to deliver survives intact.
   const safeMessage = redactSecrets(e.message);
   console.error("ERROR: " + safeMessage);
+  if (AGENT && (cmd === "state" || cmd === "state-sync") && e?.durability === "UNKNOWN" && ACTIVE_OPERATION?.operation_id) {
+    console.error(`[kb-memory] STATE DURABILITY UNKNOWN: retained immutable state receipt and operation ${ACTIVE_OPERATION.operation_id} in ${CACHE_DIR}. Do not issue a changed replacement mutation. Re-run this exact invocation after the store recovers so it can prove or refuse the original operation.`);
+  }
   // DURABLE LOCAL FALLBACK for a DIRECT CLI write (2026-08-18, the agent-seat credential bootstrap
   // fix). Before this, only content that happened to route through reflect.mjs's spawn-and-catch
   // --commit loop got saved when its write failed; a human/agent typing `mem.mjs status "..." --agent
