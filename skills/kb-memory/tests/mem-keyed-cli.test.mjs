@@ -195,3 +195,84 @@ test("actual non-keyed shared recovery refuses a corrupt retained outbox without
     rmSync(run.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+test("actual entity set shared response loss resumes the original entity row", () => {
+  const args = ["entity", "set", "synthetic_entity", "shared value", "--agent", "cto", "--share"];
+  const run = runMem(args, { lose_shared_put: true, fail_shared_read: true });
+  try {
+    assert.equal(run.result.status, 1, run.result.stderr);
+    assert.match(run.result.stderr, /SHARED DURABILITY UNKNOWN/);
+    const [fallback] = readFileSync(join(run.cacheDir, "_failed_writes-cto.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(fallback.type, "entity");
+    assert.equal(fallback.reconciliation_lane, "shared");
+    assert.match(fallback.operation_id, /^[a-f0-9]{64}$/);
+    const privateRows = rows(run.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl");
+    const sharedRows = rows(run.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/_exec/cto.jsonl");
+    assert.equal(privateRows.length, 1);
+    assert.equal(sharedRows.length, 1);
+    assert.equal(privateRows[0].type, "entity");
+    assert.equal(privateRows[0].ekey, "synthetic_entity");
+    assert.equal(privateRows[0].id, sharedRows[0].id);
+    const replay = runMem(args, { lose_shared_put: false, fail_shared_read: false }, run);
+    assert.equal(replay.result.status, 0, replay.result.stderr);
+    assert.deepEqual(rows(replay.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl").map((row) => row.id), [privateRows[0].id]);
+    assert.deepEqual(rows(replay.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/_exec/cto.jsonl").map((row) => row.id), [privateRows[0].id]);
+  } finally {
+    rmSync(run.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("actual entity link private response loss resumes the original link row", () => {
+  const args = ["entity", "link", "synthetic_source", "depends on", "synthetic_target", "--agent", "cto"];
+  const run = runMem(args, { lose_private_put: true, fail_private_read: true });
+  try {
+    assert.equal(run.result.status, 1, run.result.stderr);
+    assert.match(run.result.stderr, /PRIVATE DURABILITY UNKNOWN/);
+    const [fallback] = readFileSync(join(run.cacheDir, "_failed_writes-cto.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(fallback.type, "entity");
+    assert.equal(fallback.reconciliation_lane, "private");
+    assert.match(fallback.operation_id, /^[a-f0-9]{64}$/);
+    const privateRows = rows(run.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl");
+    assert.equal(privateRows.length, 1);
+    assert.equal(privateRows[0].type, "entity_link");
+    const replay = runMem(args, { lose_private_put: false, fail_private_read: false }, run);
+    assert.equal(replay.result.status, 0, replay.result.stderr);
+    assert.deepEqual(rows(replay.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl").map((row) => row.id), [privateRows[0].id]);
+  } finally {
+    rmSync(run.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("actual entity alias shared response loss retains its original alias row", () => {
+  const seed = runMem(["entity", "set", "canonical_entity", "seed value", "--agent", "cto"]);
+  const args = ["entity", "alias", "synthetic alias", "canonical_entity", "--agent", "cto", "--share"];
+  const run = runMem(args, { lose_shared_put: true, fail_shared_read: true }, seed);
+  try {
+    assert.equal(seed.result.status, 0, seed.result.stderr);
+    assert.equal(run.result.status, 1, run.result.stderr);
+    const privateRows = rows(run.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl");
+    const alias = privateRows.find((row) => row.type === "alias");
+    assert.ok(alias);
+    const replay = runMem(args, { lose_shared_put: false, fail_shared_read: false }, run);
+    assert.equal(replay.result.status, 0, replay.result.stderr);
+    assert.equal(rows(replay.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl").filter((row) => row.type === "alias").length, 1);
+    assert.equal(rows(replay.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/_exec/cto.jsonl").filter((row) => row.type === "alias")[0].id, alias.id);
+  } finally {
+    rmSync(seed.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("actual entity write rejects a changed intent under an explicit operation key", () => {
+  const first = runMem(["entity", "set", "synthetic_entity", "first value", "--agent", "cto", "--idempotency-key", "entity-intent-key-001"]);
+  try {
+    assert.equal(first.result.status, 0, first.result.stderr);
+    const conflict = runMem(["entity", "set", "synthetic_entity", "second value", "--agent", "cto", "--idempotency-key", "entity-intent-key-001"], {}, first);
+    assert.equal(conflict.result.status, 1, conflict.result.stderr);
+    assert.match(conflict.result.stderr, /idempotency key conflict/);
+    const privateRows = rows(conflict.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl");
+    assert.equal(privateRows.length, 1);
+    assert.equal(privateRows[0].evalue, "first value");
+  } finally {
+    rmSync(first.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});

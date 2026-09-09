@@ -273,5 +273,5 @@ test("mem.mjs's top-level catch is wired to appendFailedWriteFallback for the di
   assert.match(tail, /appendFailedWriteFallback\(AGENT, item, safeMessage, "mem\.mjs", \{ cacheDir: CACHE_DIR \}\)/);
   assert.match(tail, /const safeMessage = redactSecrets\(e\.message\)/, "the redaction must happen inside this catch");
   assert.doesNotMatch(tail, /appendFailedWriteFallback\([^)]*e\.message/, "the RAW message must never be what gets persisted");
-  assert.match(tail, /WRITE_VERBS = new Set\(\["remember", "fact", "decision", "pitfall", "status", "correct"\]\)/);
+  assert.match(tail, /WRITE_VERBS = new Set\(\["remember", "fact", "decision", "pitfall", "status", "correct", "entity"\]\)/);
 });

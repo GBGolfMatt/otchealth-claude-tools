@@ -746,13 +746,21 @@ function resolveAlias(rows, key) {
 }
 const currentEntity = (rows, k) => rows.filter((r) => r.type === "entity" && r.ekey === k).sort((x, y) => (y.ts || "").localeCompare(x.ts || ""))[0] || null;
 
+async function commitEntityAppend(buildEntry, intent, wantsShared) {
+  ACTIVE_RECONCILIATION_INTENT_HASH = operationIntentHash(intent);
+  return commitKeyedAppend(buildEntry, intent, wantsShared);
+}
+
 async function entityCmd() {
   const sub = (positional[0] || "").toLowerCase();
   // Alias routing controls deterministic recall. Refuse cross-lane alias changes before opening the
   // target store, so a caller cannot read a protected lane or append a row that wins by timestamp.
   if (sub === "alias") assertAliasOwner(AGENT, ON);
   await initStore();
-  const rows = await load();
+  // Writes obtain their private snapshot inside the durable coordinator. Keeping the preliminary
+  // read for read-only subcommands only means a transient private read cannot bypass staging an
+  // entity operation that must later reconcile an ambiguous PUT.
+  const rows = new Set(["get", "list", "graph"]).has(sub) ? await load() : null;
   if (sub === "get") {
     const k = resolveAlias(rows, positional[1] || "");
     if (!k) { console.error('usage: mem.mjs entity get <key> --agent <a>'); process.exit(2); }
@@ -774,7 +782,9 @@ async function entityCmd() {
     const from = normKey(positional[1] || ""), to = normKey(positional[2] || "");
     if (!from || !to) { console.error('usage: mem.mjs entity alias "<from-phrasing>" <to-canonical-key> --agent <a> [--source "..."] [--share]'); process.exit(2); }
     let fromRef, toRef, prevRef;
-    const { entry } = await commitAppend((freshRows) => {
+    const wantsShared = SHARE && !NO_SHARE.has(AGENT);
+    const intent = { command: "entity.alias", target: ON, share: wantsShared, from, to, tags: TAGS, source: SOURCE };
+    const { entry, shared } = await commitEntityAppend((freshRows) => {
       fromRef = normKey(positional[1] || "");
       toRef = resolveAliasTarget(freshRows, positional[2] || "");
       if (fromRef === toRef) throw new Error(`entity alias must not point ${fromRef} to itself`);
@@ -789,29 +799,27 @@ async function entityCmd() {
       });
       prevRef = built.previous;
       return built.entry;
-    });
-    let shared = false;
-    if (SHARE) shared = await publishShared(AGENT, entry);
+    }, intent, wantsShared);
     // Alias rows are lookup metadata, not semantic facts. Publishing makes them visible to the
     // gateway's cached shared-feed entity loader without paying for an embedding/index write.
     console.log(`[kb-memory] alias ${fromRef} -> ${toRef} -> ${AGENT} id=${entry.id}${prevRef ? ` (was: ${prevRef.evalue})` : ""}${shared ? "; shared" : ""}.`);
     return;
   }
   if (sub === "set") {
-    const k = resolveAlias(rows, positional[1] || "");
+    const k = normKey(positional[1] || "");
     const value = positional.slice(2).join(" ").trim();
     if (!k || !value) { console.error('usage: mem.mjs entity set <key> "<value>" --agent <a> [--source "..."] [--share]'); process.exit(2); }
     // Resolve the alias + prior value from the FRESH rows on each attempt, so a concurrent set of the
     // same key supersedes the right (latest) prior entry rather than a stale snapshot.
     let prevRef, keyRef;
-    const { entry } = await commitAppend((freshRows) => {
+    const wantsShared = SHARE && !NO_SHARE.has(AGENT);
+    const intent = { command: "entity.set", target: ON, share: wantsShared, key: k, value, tags: TAGS, source: SOURCE };
+    const { entry, shared } = await commitEntityAppend((freshRows) => {
       keyRef = resolveAlias(freshRows, positional[1] || "");
       const prev = currentEntity(freshRows, keyRef);
       prevRef = prev;
       return { id: newId(freshRows), ts: new Date().toISOString(), type: "entity", ekey: keyRef, evalue: value, text: `${keyRef} = ${value}`, tags: TAGS, by: AGENT, source: SOURCE || undefined, was: (CROSS ? undefined : (prev ? prev.evalue : undefined)), supersedes: (CROSS ? undefined : (prev ? prev.id : undefined)) };
-    });
-    let shared = false;
-    if (SHARE) shared = await publishShared(AGENT, entry);
+    }, intent, wantsShared);
     maybeIndex(entry, shared);
     console.log(`[kb-memory] entity ${keyRef} = ${value} -> ${AGENT} id=${entry.id}${prevRef ? ` (was: ${prevRef.evalue})` : ""}${shared ? "; shared+indexed" : ""}.`);
     return;
@@ -826,13 +834,13 @@ async function entityCmd() {
     if (!fromRaw || !relRaw || !toRaw) { console.error('usage: mem.mjs entity link <from-key> <relation> <to-key> --agent <a> [--source "..."] [--share]'); process.exit(2); }
     // Resolve both endpoint aliases from the FRESH rows on each attempt (same concurrency-safety
     // pattern as `entity set` above), so links work through aliases exactly like get/set do.
-    const { entry } = await commitAppend((freshRows) => {
+    const wantsShared = SHARE && !NO_SHARE.has(AGENT);
+    const intent = { command: "entity.link", target: ON, share: wantsShared, from: normKey(fromRaw), relation: normKey(relRaw), to: normKey(toRaw), tags: TAGS, source: SOURCE };
+    const { entry, shared } = await commitEntityAppend((freshRows) => {
       const fromKey = resolveAlias(freshRows, fromRaw);
       const toKey = resolveAlias(freshRows, toRaw);
       return { id: newId(freshRows), ts: new Date().toISOString(), ...linkFields(fromKey, relRaw, toKey), tags: TAGS, by: AGENT, source: SOURCE || undefined };
-    });
-    let shared = false;
-    if (SHARE) shared = await publishShared(AGENT, entry);
+    }, intent, wantsShared);
     maybeIndex(entry, shared);
     console.log(`[kb-memory] entity link ${entry.ekey} -${entry.relation}-> ${entry.evalue} -> ${AGENT} id=${entry.id}${shared ? "; shared+indexed" : ""}.`);
     return;
@@ -1213,10 +1221,10 @@ async function runPack() {
   // instant this process exited, unless someone happened to be watching the terminal and retyped it
   // by hand. This mirrors reflect.mjs's own fallback (same file, same per-agent path, same shape) for
   // the verbs that actually carry recoverable free text. Read-only verbs (recall/tail/whoami/...) and
-  // structural writes without a `--was`-shaped WAS/`entity` free-text pair are intentionally NOT
-  // covered here -- this is an HONEST, named safety net for the common case (remember/decision/
-  // pitfall/status/correct), not a claim that every possible write path is now loss-proof.
-  const WRITE_VERBS = new Set(["remember", "fact", "decision", "pitfall", "status", "correct"]);
+  // Entity operations carry their canonical command text and now use the same durable coordinator,
+  // so include them here. State writes remain on their separate protocol and are intentionally not
+  // represented as append-only fallback rows.
+  const WRITE_VERBS = new Set(["remember", "fact", "decision", "pitfall", "status", "correct", "entity"]);
   if (AGENT && TEXT && WRITE_VERBS.has(cmd)) {
     const item = { type: cmd, text: TEXT, share: SHARE || cmd === "status", tags: ["mem-direct-fallback"] };
     // A non-keyed shared append can be accepted by the object store while its response is lost.
