@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -52,8 +52,11 @@ test("an unkeyed pending operation reuses only its exact lane and intent, then r
   const home = await mkdtemp(join(tmpdir(), "memory-auto-outbox-"));
   const intent = { type: "fact", text: "synthetic unkeyed recovery", share: false };
   try {
+    const explicit = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", idempotencyKey: "explicit-audit-key-001", intent, wantsShared: false, home });
+    releaseOperation(explicit);
     const first = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home });
     assert.equal(first.auto_generated_key, true);
+    assert.notEqual(first.idempotency_key, explicit.idempotency_key, "an unkeyed invocation must never replay an explicit operation key");
     releaseOperation(first);
     const replay = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home });
     assert.equal(replay.idempotency_key, first.idempotency_key, "an exact restart must retain the pending operation identity");
@@ -69,6 +72,43 @@ test("an unkeyed pending operation reuses only its exact lane and intent, then r
     assert.notEqual(later.idempotency_key, first.idempotency_key, "a completed operation must not deduplicate a later intentional write");
     completeOperation(advanceOperation(later, "private_stored", { private_entry_id: "later" }));
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("an unkeyed retry refuses malformed and filename-mismatched own-lane outbox records", async () => {
+  const intent = { type: "fact", text: "synthetic corrupt recovery", share: false };
+  const malformedHome = await mkdtemp(join(tmpdir(), "memory-malformed-outbox-"));
+  const mismatchHome = await mkdtemp(join(tmpdir(), "memory-mismatched-outbox-"));
+  const unreadableHome = await mkdtemp(join(tmpdir(), "memory-unreadable-outbox-"));
+  try {
+    const malformed = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home: malformedHome });
+    releaseOperation(malformed);
+    await writeFile(malformed._file, "{not-json\n");
+    assert.throws(
+      () => stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home: malformedHome }),
+      /outbox is unreadable or malformed.*refusing automatic retry/,
+    );
+
+    const mismatched = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home: mismatchHome });
+    releaseOperation(mismatched);
+    await rename(mismatched._file, join(dirname(mismatched._file), "f".repeat(64) + ".json"));
+    assert.throws(
+      () => stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home: mismatchHome }),
+      /outbox has an invalid identity.*refusing automatic retry/,
+    );
+
+    const unreadable = stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home: unreadableHome });
+    releaseOperation(unreadable);
+    await rm(unreadable._file, { force: true });
+    await mkdir(unreadable._file);
+    assert.throws(
+      () => stageOperation({ agent: "cto", callerLane: "cto", targetLane: "cto", intent, wantsShared: false, home: unreadableHome }),
+      /outbox is unreadable or malformed.*refusing automatic retry/,
+    );
+  } finally {
+    await rm(malformedHome, { recursive: true, force: true });
+    await rm(mismatchHome, { recursive: true, force: true });
+    await rm(unreadableHome, { recursive: true, force: true });
+  }
 });
 
 test("an explicit key cannot be replayed with a different intent", async () => {

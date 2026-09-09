@@ -177,3 +177,21 @@ test("actual non-keyed private response loss resumes the original private row wi
     rmSync(run.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+test("actual non-keyed shared recovery refuses a corrupt retained outbox without creating replacement rows", () => {
+  const args = ["status", "synthetic corrupt shared recovery", "--agent", "cto"];
+  const run = runMem(args, { lose_shared_put: true, fail_shared_read: true });
+  try {
+    assert.equal(run.result.status, 1, run.result.stderr);
+    const outbox = join(run.cacheDir, "_write-outbox-cto");
+    const [pending] = readdirSync(outbox).filter((name) => name.endsWith(".json"));
+    writeFileSync(join(outbox, pending), "{not-json\n");
+    const replay = runMem(args, { lose_shared_put: false, fail_shared_read: false }, run);
+    assert.equal(replay.result.status, 1, replay.result.stderr);
+    assert.match(replay.result.stderr, /outbox is unreadable or malformed.*refusing automatic retry/);
+    assert.equal(rows(replay.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/cto.jsonl").length, 1);
+    assert.equal(rows(replay.store, S3_HOST, "/otchealthcommons/company-journal/_MEMORY/_exec/cto.jsonl").length, 1);
+  } finally {
+    rmSync(run.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});

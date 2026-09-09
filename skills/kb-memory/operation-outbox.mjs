@@ -160,15 +160,29 @@ function pendingOperationKey(agent, callerLane, targetLane, intentHash, wantsSha
   const matches = [];
   for (const name of names) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    const file = join(directory, name);
+    let record;
     try {
-      const file = join(directory, name);
-      if (statSync(file).size > 65536) continue;
-      const record = JSON.parse(readFileSync(file, "utf8"));
-      if (record.caller_lane !== callerLane || record.target_lane !== targetLane || record.intent_hash !== intentHash ||
-          record.wants_shared !== !!wantsShared || !safeKey(record.idempotency_key) ||
-          record.operation_id !== operationIdentity(callerLane, targetLane, record.idempotency_key)) continue;
-      matches.push(record.idempotency_key);
-    } catch {}
+      const stat = statSync(file);
+      if (!stat.isFile() || stat.size > 65536) throw new Error("not a bounded regular file");
+      record = JSON.parse(readFileSync(file, "utf8"));
+    } catch (error) {
+      throw new Error(`pending memory operation outbox is unreadable or malformed (${name}); refusing automatic retry: ${error.message}`);
+    }
+    const recordIdentity = operationIdentity(record?.caller_lane, record?.target_lane, record?.idempotency_key);
+    if (record?.version !== 1 || typeof record?.caller_lane !== "string" || !record.caller_lane ||
+        typeof record?.target_lane !== "string" || !record.target_lane || !safeKey(record?.idempotency_key) ||
+        !/^[a-f0-9]{64}$/.test(record?.intent_hash || "") || typeof record?.wants_shared !== "boolean" ||
+        !(record.auto_generated_key === true || record.auto_generated_key === false || record.auto_generated_key === undefined) ||
+        !(record.stage in stageRank) || record.operation_id !== recordIdentity || name !== `${recordIdentity}.json`) {
+      throw new Error(`pending memory operation outbox has an invalid identity (${name}); refusing automatic retry`);
+    }
+    // Records written before automatic recovery, and all caller-supplied keys, are intentionally
+    // excluded. An unkeyed invocation must never take authority over an explicit operation key.
+    if (record.auto_generated_key !== true) continue;
+    if (record.caller_lane !== callerLane || record.target_lane !== targetLane || record.intent_hash !== intentHash ||
+        record.wants_shared !== !!wantsShared) continue;
+    matches.push(record.idempotency_key);
   }
   if (matches.length > 1) throw new Error("multiple pending memory operations match this unkeyed intent; refusing to guess");
   return matches[0] || null;
