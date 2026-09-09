@@ -73,6 +73,7 @@ function defaultDispatch(owner, text) {
 
 const dispatchText = (s) => `[signal-radar] ${s.severity.toUpperCase()} ${s.detector}: ${s.why} Action: ${s.suggested_action}`;
 const hasEtag = (value) => typeof value === "string" && value.length > 0;
+const cooldownClock = (doc) => [doc?.ts, doc?.dispatch_started_at, doc?.dispatched_at].filter(Boolean).sort().at(-1) || doc?.ts;
 
 /** A dispatch has no downstream idempotency key or authoritative readback. Claim it with CAS before
  * invoking the writer, then leave any interrupted/failed attempt ambiguous rather than retrying it. */
@@ -151,7 +152,7 @@ export async function runScan(opts = {}) {
   for (const s of allSignals) {
     let history = [];
     if (cosmosCfg) {
-      try { history = await io.cosmosQuerySignals(s.owner, "SELECT c.ts FROM c WHERE c.id = @id", [{ name: "@id", value: s.id }]); }
+      try { history = await io.cosmosQuerySignals(s.owner, "SELECT c.ts, c.dispatch_started_at, c.dispatched_at FROM c WHERE c.id = @id", [{ name: "@id", value: s.id }]); history = history.map((doc) => ({ ...doc, ts: cooldownClock(doc) })); }
       catch (error) {
         if (emitting) { console.error(`  [warn] could not read signal history ${s.id}: ${error.message}`); historyFailure = true; continue; }
         // A dry-run remains observationally fail-open.
@@ -216,6 +217,7 @@ export async function runScan(opts = {}) {
       const rows = await io.cosmosQueryDispatchSignals(scope.owner, scope.detector, state);
       if (rows.length > 100) unresolved.push({ state: "backlog", reason: `replay backlog reached 100 ${state} records; rerun after inspection` });
       for (const s of rows.slice(0, 100)) {
+        if (s.owner !== scope.owner || s.detector !== scope.detector) { unresolved.push({ state: "invalid_scope", reason: "journal row did not match its owner/detector scope" }); continue; }
         if (state !== "pending") { unresolved.push({ id: s.id, state, reason: "dispatch outcome is ambiguous; inspect inbox before retrying" }); continue; }
         const outcome = await deliverPending(io, dispatch, s, now);
         if (outcome.status === "sent") { dispatched.push(s.id); replayedIds.add(s.id); } else unresolved.push(outcome);
@@ -235,12 +237,16 @@ export async function runScan(opts = {}) {
     try {
       if (replayedIds.has(s.id)) continue;
       const existing = await io.cosmosReadSignal(s.owner, s.id);
+      if (existing && !hasEtag(existing.etag)) {
+        unresolved.push({ id: s.id, state: "invalid_etag", reason: "existing journal record lacks an etag" });
+        continue;
+      }
       if (["dispatching", "ambiguous"].includes(existing?.doc?.dispatch_state)) {
           unresolved.push({ id: s.id, state: existing.doc.dispatch_state, reason: "existing dispatch outcome is ambiguous; inspect inbox before retrying" });
           continue;
       }
       if (existing?.doc?.dispatch_state === "pending") continue;
-      if (existing?.doc && !shouldFire([existing.doc], now, { cooldownMin: COOLDOWN_MIN_BY_SEVERITY[s.severity] ?? 720, escalateAfter: ESCALATE_AFTER }).fire) continue;
+      if (existing?.doc && !shouldFire([{ ...existing.doc, ts: cooldownClock(existing.doc) }], now, { cooldownMin: COOLDOWN_MIN_BY_SEVERITY[s.severity] ?? 720, escalateAfter: ESCALATE_AFTER }).fire) continue;
       const needsDispatch = s.severity === "high" || d.escalate;
       const journal = { id: s.id, owner: s.owner, ...s, escalate: d.escalate, consecutive: d.consecutive, dispatch_state: needsDispatch ? "pending" : "not_required" };
       let put;
@@ -276,9 +282,9 @@ export async function runScan(opts = {}) {
   // Narration only, never part of the structured contract: in --json mode this MUST go to stderr so
   // stdout stays pure, parseable JSON for a machine caller (e.g. the Container Apps Job wrapper).
   const summaryLine =
-    persisted === firing.length
+    persistFailures === 0
       ? `[signal-radar] persisted ${persisted} signal(s); dispatched ${dispatched.length} to owner inbox(es).`
-      : `[signal-radar] persisted ${persisted}/${firing.length} signal(s) (${firing.length - persisted} FAILED, see [warn] lines above); dispatched ${dispatched.length} to owner inbox(es).`;
+      : `[signal-radar] persisted ${persisted} signal(s) (${persistFailures} FAILED, see [warn] lines above); dispatched ${dispatched.length} to owner inbox(es).`;
   if (asJson) console.error(summaryLine); else console.log(`\n${summaryLine}`);
   if (unresolved.length) console.error(`[signal-radar] ${unresolved.length} unresolved dispatch record(s); inspect the durable journal before retrying.`);
 

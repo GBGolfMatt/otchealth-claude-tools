@@ -245,3 +245,28 @@ test("runScan(): a conditional claim conflict fails loud without dispatching", a
     assert.equal(process.exitCode, 1);
   } finally { io.cosmosReplaceSignal = originalReplace; process.exitCode = savedExitCode; }
 });
+
+test("runScan(): missing read or claim etag fails closed without dispatch", async () => {
+  const savedExitCode = process.exitCode; const io = durableIo(); const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "missing-etag", severity: "high", why: "x", suggested_action: "y" });
+  io.cosmosReadSignal = async () => ({ doc: { id: signal.id, owner: "cto", ...signal, dispatch_state: "pending" }, etag: "" });
+  try {
+    const result = await runScan({ emitting: true, detectors: [firingDetector(signal)], io, dispatch: async () => { throw new Error("must not dispatch"); } });
+    assert.equal(result.dispatched.length, 0); assert.equal(process.exitCode, 1);
+  } finally { process.exitCode = savedExitCode; }
+});
+
+test("runScan(): scoped replay rejects a cross-owner row before reading or dispatching", async () => {
+  const savedExitCode = process.exitCode; const io = durableIo(); const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "scope", severity: "high", why: "x", suggested_action: "y" });
+  io.cosmosQueryDispatchSignals = async () => [{ ...signal, owner: "cro", dispatch_state: "pending" }];
+  try {
+    const result = await runScan({ emitting: true, detectors: [{ NAME: "fake-detector", OWNER: "cto", run: async () => ({ signals: [], notes: [] }) }], io, dispatch: async () => { throw new Error("must not dispatch"); } });
+    assert.equal(result.unresolved[0].state, "invalid_scope"); assert.equal(process.exitCode, 1);
+  } finally { process.exitCode = savedExitCode; }
+});
+
+test("runScan(): a replayed old pending signal is not sent again in the same scan", async () => {
+  const io = durableIo(); const calls = []; const signal = makeSignal({ detector: "fake-detector", owner: "cto", subject: "old-pending", severity: "high", why: "x", suggested_action: "y", ts: "2020-01-01T00:00:00.000Z" });
+  await io.cosmosCreateSignal({ ...signal, dispatch_state: "pending" });
+  const result = await runScan({ emitting: true, detectors: [firingDetector(signal)], io, dispatch: async () => calls.push("send") });
+  assert.deepEqual(calls, ["send"]); assert.deepEqual(result.dispatched, [signal.id]);
+});
