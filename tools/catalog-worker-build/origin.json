@@ -1,12 +1,12 @@
 {
   "origin_repository": "InnerScopeHearing/otchealth-cto",
-  "source_commit": "bf605fd318a55ae969933171c6dec6582c11ffd8",
+  "source_commit": "0bf97add6ed0263b954b1320e56e6b0c6ab2ca4f",
   "component_path": "tools/neptune-trial/catalog-materializer",
   "files": [
     {
       "path": ".dockerignore",
-      "sha256": "30e249f52901e4e3b37a2c34c9726dc98e078f9d8f5845209966dffaecf055a2",
-      "size": 116
+      "sha256": "4da7b93ea08363921d9d5305a604bdf778f25252a56e78ceddf30f3b7dde4c70",
+      "size": 239
     },
     {
       "path": "COVERAGE.md",
@@ -82,6 +82,11 @@
       "path": "test_coverage_report.py",
       "sha256": "24fd5143669bea9c2b4bc273bd6564077d37c5bba709c0707189f933ff4605ee",
       "size": 11189
+    },
+    {
+      "path": "test_docker_context.py",
+      "sha256": "9b6c4b0e8f201e53309b0ef442534af4fbe52842f0b270047447411d668ff02a",
+      "size": 1468
     },
     {
       "path": "test_inventory_census.py",
