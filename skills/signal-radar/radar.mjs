@@ -79,10 +79,10 @@ const cooldownClock = (doc) => [doc?.ts, doc?.dispatch_started_at, doc?.dispatch
  * invoking the writer, then leave any interrupted/failed attempt ambiguous rather than retrying it. */
 async function deliverPending(io, dispatch, signal, now) {
   const current = await io.cosmosReadSignal(signal.owner, signal.id);
-  if (!current || !hasEtag(current.etag) || current.doc?.owner !== signal.owner || current.doc?.id !== signal.id || current.doc.dispatch_state !== "pending") return { status: "unresolved", id: signal.id, reason: "pending record changed, missing, or lacks an etag" };
+  if (!current || !hasEtag(current.etag) || current.doc?.owner !== signal.owner || current.doc?.id !== signal.id || current.doc?.detector !== signal.detector || current.doc.dispatch_state !== "pending") return { status: "unresolved", id: signal.id, reason: "pending record changed, missing, or lacks an etag" };
   const claim = { ...current.doc, dispatch_state: "dispatching", dispatch_started_at: new Date(now).toISOString() };
   const claimed = await io.cosmosReplaceSignal(signal.owner, signal.id, claim, current.etag);
-  if (!claimed?.ok || !hasEtag(claimed.etag)) return { status: "unresolved", id: signal.id, reason: "dispatch claim conflicted or lacks an etag" };
+  if (claimed?.ok !== true || !hasEtag(claimed.etag)) return { status: "unresolved", id: signal.id, reason: "dispatch claim conflicted or lacks an etag" };
   try {
     await dispatch(current.doc.owner, dispatchText(current.doc));
   } catch (error) {
@@ -93,7 +93,7 @@ async function deliverPending(io, dispatch, signal, now) {
   // fleet-dispatch has no receiver readback. `sent` means only that its bounded subprocess returned.
   const sent = { ...claim, dispatch_state: "sent", dispatch_confirmation: "subprocess_return_only", dispatched_at: new Date(now).toISOString() };
   const recorded = await io.cosmosReplaceSignal(signal.owner, signal.id, sent, claimed.etag);
-  if (!recorded?.ok) return { status: "ambiguous", id: signal.id, reason: "dispatch may have succeeded but sent receipt was not persisted" };
+  if (recorded?.ok !== true) return { status: "ambiguous", id: signal.id, reason: "dispatch may have succeeded but sent receipt was not persisted" };
   return { status: "sent", id: signal.id, confirmation: "subprocess_return_only" };
 }
 
@@ -154,7 +154,7 @@ export async function runScan(opts = {}) {
     if (cosmosCfg) {
       try { history = await io.cosmosQuerySignals(s.owner, "SELECT c.ts, c.dispatch_started_at, c.dispatched_at FROM c WHERE c.id = @id", [{ name: "@id", value: s.id }]); history = history.map((doc) => ({ ...doc, ts: cooldownClock(doc) })); }
       catch (error) {
-        if (emitting) { console.error(`  [warn] could not read signal history ${s.id}: ${error.message}`); historyFailure = true; continue; }
+        if (emitting) { console.error(`  [warn] signal history read failed; no dispatch permitted.`); historyFailure = true; continue; }
         // A dry-run remains observationally fail-open.
       }
     }
@@ -261,7 +261,7 @@ export async function runScan(opts = {}) {
       persisted++;
       persistedThisSignal = true;
     }
-    catch (e) { persistFailures++; console.error(`  [warn] could not persist signal ${s.id}: ${e.message}`); }
+    catch { persistFailures++; console.error(`  [warn] signal journal write failed; no dispatch permitted.`); }
 
     // Dispatch must be causally downstream of a confirmed durable record. A failed write is already
     // a non-zero outcome below, and must never still page an owner with an unjournaled signal.
