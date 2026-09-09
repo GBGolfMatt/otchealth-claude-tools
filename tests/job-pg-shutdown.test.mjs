@@ -53,13 +53,16 @@ export async function cosmosConfig(){await state.queryDocs('signals','SELECT * F
 export const cosmosPutSignal=async()=>({ok:process.env.PG_FIXTURE_PARTIAL!=='true',reason:'fixture_failure'}), cosmosQuerySignals=async()=>[], posthogEmit=async()=>{};
 export const isConfigured=async()=>true;
 export const queryDocs=(...args)=>state.queryDocs(...args);
+export const closeConnection=()=>state.closeConnection();
+export const createDoc=(...args)=>process.env.PG_FIXTURE_PARTIAL==='true'?Promise.reject(new Error('fixture_failure')):state.createDoc(...args);
+export const readDoc=(...args)=>state.readDoc(...args), replaceDoc=(...args)=>state.replaceDoc(...args);
 export const newId=()=> 'fixture';
 `);
       const fixtureUrl = pathToFileURL(fixturePath).href;
       const loaderPath = join(dir, 'loader.mjs');
       await writeFile(loaderPath, `export async function resolve(specifier, context, nextResolve) {
  const parent=context.parentURL||'';
- if ((parent.endsWith('/skills/signal-radar/radar.mjs') && (specifier==='./common.mjs'||specifier==='./schema.mjs'||specifier.startsWith('./detectors/'))) || (parent.endsWith('/skills/decision-clock/decision.mjs') && specifier==='./cosmos-client.mjs')) return {url:${JSON.stringify(fixtureUrl)},shortCircuit:true};
+ if ((parent.endsWith('/skills/signal-radar/radar.mjs') && (specifier==='./common.mjs'||specifier==='./schema.mjs'||specifier.startsWith('./detectors/')||specifier==='../kb-memory/pg-state.mjs')) || (parent.endsWith('/skills/decision-clock/decision.mjs') && specifier==='./cosmos-client.mjs')) return {url:${JSON.stringify(fixtureUrl)},shortCircuit:true};
  return nextResolve(specifier,context);
 }`);
       const preload = 'data:text/javascript,' + encodeURIComponent(`import {register} from 'node:module';register(${JSON.stringify(pathToFileURL(loaderPath).href)});`);
@@ -78,6 +81,7 @@ export const newId=()=> 'fixture';
         child.once('exit', (code, signal) => { clearTimeout(timer); resolve({code, signal}); });
       });
       assert.equal(result.code, partial ? 1 : 0, stderr);
+      if (partial) assert.match(stderr, /signal journal write failed/, "the partial-persistence failure path must be the reason for exit 1");
       assert.equal(result.signal, null);
       assert.ok(queries >= 1, 'the test must open and query the real state connection');
       assert.equal(terminations, 1, 'the real wire client must send PostgreSQL Terminate');
