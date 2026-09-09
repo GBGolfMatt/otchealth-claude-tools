@@ -26,8 +26,9 @@ function sharedLogicalIntent(entry) {
     type: entry.type,
     text: entry.text,
     tags: entry.tags ?? [],
-    source: entry.source ?? null,
-    supersedes: entry.supersedes ?? null,
+    // Shared durable rows omit empty optional fields, matching gateway appendShared.
+    source: entry.source || null,
+    supersedes: entry.supersedes || null,
   };
 }
 
