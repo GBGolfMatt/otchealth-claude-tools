@@ -185,7 +185,7 @@ function lowerKeys(obj) {
   return out;
 }
 
-async function s3Request({ method, loc, path, query, body, contentType, extraHeaders }) {
+async function s3Request({ method, loc, path, query, body, contentType, extraHeaders, signal }) {
   const credentials = await creds();
   if (!credentials) throw new Error("s3-blob: AWS credentials unavailable (checked the ECS task role, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, and OTC_AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)");
   const host = `${loc.bucket}.s3.${REGION}.amazonaws.com`;
@@ -193,7 +193,7 @@ async function s3Request({ method, loc, path, query, body, contentType, extraHea
   const signHeaders = { ...(contentType ? { "content-type": contentType } : {}), ...lowerKeys(extraHeaders) };
   const headers = signS3({ method, host, path: rawPath, query, body, credentials, extraHeaders: signHeaders });
   const url = query ? `https://${host}${canonicalUri(rawPath)}?${canonicalQueryString(query)}` : `https://${host}${canonicalUri(rawPath)}`;
-  return fetch(url, { method, headers, ...(body ? { body } : {}) });
+  return fetch(url, { method, headers, ...(body ? { body } : {}), ...(signal ? { signal } : {}) });
 }
 
 function locOrThrow(account, container) {
@@ -207,9 +207,9 @@ function locOrThrow(account, container) {
  *  migration exists to close. The ETag rides along on the SAME GET response (S3 always returns it),
  *  so a caller that needs it for a conditional PUT (mem.mjs's commitAppend) does not need a second
  *  HEAD round-trip. */
-export async function getTextMetaFromS3(account, container, path) {
+export async function getTextMetaFromS3(account, container, path, options = {}) {
   const loc = locOrThrow(account, container);
-  const r = await s3Request({ method: "GET", loc, path });
+  const r = await s3Request({ method: "GET", loc, path, signal: options.signal });
   if (r.status === 404) return { text: null, etag: null };
   if (!r.ok) throw new Error(`s3 get ${r.status} (refusing to report a missing object as empty): ${(await r.text()).slice(0, 200)}`);
   return { text: await r.text(), etag: r.headers.get("etag") };
@@ -226,10 +226,10 @@ export async function getTextFromS3(account, container, path) {
  *  natively since AWS's August-2024 conditional-writes release). Returns {etag}. Throws on every
  *  non-2xx; the caller (mem.mjs's commitAppend retry loop) is what turns a 412 into a reload+retry,
  *  never this function silently swallowing it. */
-export async function putObjectToS3(account, container, path, body, contentType, extraHeaders) {
+export async function putObjectToS3(account, container, path, body, contentType, extraHeaders, options = {}) {
   const loc = locOrThrow(account, container);
   const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body), "utf8");
-  const r = await s3Request({ method: "PUT", loc, path, body: buf, contentType, extraHeaders });
+  const r = await s3Request({ method: "PUT", loc, path, body: buf, contentType, extraHeaders, signal: options.signal });
   if (!r.ok) {
     const status = r.status;
     const text = (await r.text().catch(() => "")).slice(0, 200);

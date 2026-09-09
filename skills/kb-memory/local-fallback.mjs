@@ -14,9 +14,13 @@
 // per agent so a recovery pass can be run per-agent without cross-agent interference.
 import { mkdirSync, appendFileSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { redactSecrets } from "./redact.mjs";
 
-export const FAILED_WRITE_FILE = (agent) => `${homedir()}/.claude/kb-cache/_failed_writes-${agent || "unknown"}.jsonl`;
+const defaultCacheDir = () => join(homedir(), ".claude", "kb-cache");
+
+export const FAILED_WRITE_FILE = (agent, cacheDir = defaultCacheDir()) =>
+  join(cacheDir, `_failed_writes-${agent || "unknown"}.jsonl`);
 
 /**
  * Record an entry that failed to persist to its real ledger, so it is recoverable rather than gone.
@@ -26,11 +30,10 @@ export const FAILED_WRITE_FILE = (agent) => `${homedir()}/.claude/kb-cache/_fail
  * -- if even the local fallback file cannot be written (e.g. a read-only home dir), that is reported
  * to stderr rather than swallowed a second time; there is nowhere further to degrade to.
  */
-export function appendFailedWriteFallback(agent, item, error, source = "reflect.mjs") {
+export function appendFailedWriteFallback(agent, item, error, source = "reflect.mjs", { cacheDir = defaultCacheDir() } = {}) {
   try {
-    const dir = `${homedir()}/.claude/kb-cache`;
-    mkdirSync(dir, { recursive: true });
-    const file = FAILED_WRITE_FILE(agent);
+    mkdirSync(cacheDir, { recursive: true });
+    const file = FAILED_WRITE_FILE(agent, cacheDir);
     const tags = item._fallback ? ["auto-extract-fallback"] : (Array.isArray(item.tags) && item.tags.length ? item.tags : ["auto-reflect"]);
     // `error` is redacted at THIS choke point, not only at each call site, because every caller
     // (mem.mjs's direct-CLI catch and reflect.mjs's --commit loop alike) funnels through here, and
@@ -45,9 +48,26 @@ export function appendFailedWriteFallback(agent, item, error, source = "reflect.
     // them, so reflect.mjs's own calls (which never pass these) produce byte-identical rows to before.
     if (item.was) row.was = item.was;
     if (item.on) row.on = item.on;
+    for (const field of ["idempotency_key", "operation_id", "operation_stage", "intent_hash", "private_entry_id", "shared_durability", "reconciliation_lane", "reconciliation_entry_id", "reconciliation_intent_hash"]) {
+      if (item[field]) row[field] = item[field];
+    }
     appendFileSync(file, JSON.stringify(row) + "\n");
     try { chmodSync(file, 0o600); } catch {} // cheap + idempotent; matches the 0600 posture the rest of kb-cache uses for anything sensitive
   } catch (e) {
     console.error(`[kb-memory] FALLBACK WRITE ALSO FAILED for agent '${agent}': ${e.message}. The item above is genuinely unrecoverable from this run.`);
+  }
+}
+
+export function appendReconciliationReceipt(agent, entryId, intentHash, { cacheDir = defaultCacheDir() } = {}) {
+  try {
+    if (typeof entryId !== "string" || typeof intentHash !== "string") throw new Error("invalid reconciliation receipt");
+    mkdirSync(cacheDir, { recursive: true });
+    appendFileSync(FAILED_WRITE_FILE(agent, cacheDir), JSON.stringify({
+      ts: new Date().toISOString(), agent, reconciliation: "resolved",
+      reconciliation_entry_id: entryId, reconciliation_intent_hash: intentHash,
+    }) + "\n");
+    try { chmodSync(FAILED_WRITE_FILE(agent, cacheDir), 0o600); } catch {}
+  } catch (error) {
+    console.error(`[kb-memory] RECONCILIATION RECEIPT WRITE FAILED for agent '${agent}': ${error.message}.`);
   }
 }

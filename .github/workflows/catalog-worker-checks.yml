@@ -1,0 +1,29 @@
+name: catalog-worker-checks
+on:
+  pull_request:
+    paths:
+      - 'tools/catalog-worker-build/**'
+      - 'tools/neptune-trial/catalog-materializer/**'
+      - '.github/workflows/build-catalog-worker-ecr.yml'
+      - '.github/workflows/catalog-worker-checks.yml'
+permissions:
+  contents: read
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify source bundle and Linux process behavior without cloud credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(python3 -c 'import json; print(json.load(open("tools/catalog-worker-build/origin.json"))["source_commit"])')"
+          python3 tools/catalog-worker-build/verify.py --expected-source-commit "$source_commit" --receipt "$RUNNER_TEMP/source-origin.json"
+          python3 -W error::ResourceWarning -m unittest discover -s tools/catalog-worker-build -p 'test_*.py' -v
+          python3 -W error::ResourceWarning -m unittest discover -s tools/neptune-trial/catalog-materializer -p 'test_*.py' -v
+          bash -n tools/neptune-trial/catalog-materializer/build-worker.sh

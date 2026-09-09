@@ -175,3 +175,16 @@ test("semantic.mjs defaults its blob reads to 's3' too, matching mem.mjs (contra
   const src = await readFile(new URL("../semantic.mjs", import.meta.url), "utf8");
   assert.match(src, /const BLOB_BACKEND = \(process\.env\.BLOB_BACKEND \|\| "s3"\)\.toLowerCase\(\);/);
 });
+
+
+test("getTextMetaFromS3 forwards the caller AbortSignal to the actual fetch", async () => {
+  await withEnv(FAKE_CREDS, async () => {
+    const controller = new AbortController();
+    let observed;
+    await withStubbedFetch(async (_url, init) => {
+      observed = init.signal;
+      return new Response("row", { status: 200, headers: { etag: '"e"' } });
+    }, () => getTextMetaFromS3("otchealthcommons", "company-journal", "_MEMORY/_exec/cto.jsonl", { signal: controller.signal }));
+    assert.equal(observed, controller.signal);
+  });
+});

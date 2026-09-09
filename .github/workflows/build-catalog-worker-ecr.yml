@@ -1,0 +1,74 @@
+name: build-catalog-worker-ecr
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolkit_commit:
+        description: Exact reviewed toolkit commit already merged into main
+        required: true
+      source_commit:
+        description: Exact CTO commit in the reviewed origin manifest
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: build-catalog-worker-ecr
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TOOLKIT_COMMIT: ${{ inputs.toolkit_commit }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select reviewed source already present on trusted main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TOOLKIT_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git cat-file -t "$TOOLKIT_COMMIT")" = commit
+          git merge-base --is-ancestor "$TOOLKIT_COMMIT" HEAD
+          git checkout --detach "$TOOLKIT_COMMIT"
+          test "$(git rev-parse HEAD)" = "$TOOLKIT_COMMIT"
+          python3 tools/catalog-worker-build/verify.py --expected-source-commit "$SOURCE_COMMIT" --receipt "$RUNNER_TEMP/source-origin.json"
+          python3 -m unittest discover -s tools/catalog-worker-build -p 'test_*.py' -v
+          python3 -m unittest discover -s tools/neptune-trial/catalog-materializer -p 'test_*.py' -v
+      - name: Assume existing toolkit main ECR push role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: arn:aws:iam::900915535335:role/otchealth-github-ecr-push-doc-indexer
+          role-session-name: catalog-worker-build-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@aded0d722166a37980e030aa969dda0bfe6b6947
+      - name: Set up existing Depot build client
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c
+      - name: Build unique worker image and verify registry manifest
+        env:
+          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DEPOT_TOKEN"
+          bash tools/neptune-trial/catalog-materializer/build-worker.sh
+          cp "$RUNNER_TEMP/source-origin.json" "$RUNNER_TEMP/cfo-catalog-$TOOLKIT_COMMIT/source-origin.json"
+          python3 tools/catalog-worker-build/validate_build.py --directory "$RUNNER_TEMP/cfo-catalog-$TOOLKIT_COMMIT" --expected-source-commit "$SOURCE_COMMIT" --expected-toolkit-commit "$TOOLKIT_COMMIT"
+      - name: Preserve immutable build and source receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cfo-catalog-${{ inputs.toolkit_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cfo-catalog-${{ inputs.toolkit_commit }}/
+          if-no-files-found: error
+          retention-days: 30

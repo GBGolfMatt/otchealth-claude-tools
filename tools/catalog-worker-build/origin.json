@@ -1,0 +1,67 @@
+{
+  "origin_repository": "InnerScopeHearing/otchealth-cto",
+  "source_commit": "d47fc97eeccba929577445280d122fea09c59785",
+  "component_path": "tools/neptune-trial/catalog-materializer",
+  "files": [
+    {
+      "path": ".dockerignore",
+      "sha256": "30e249f52901e4e3b37a2c34c9726dc98e078f9d8f5845209966dffaecf055a2",
+      "size": 116
+    },
+    {
+      "path": "Dockerfile",
+      "sha256": "3f01061927546274fe3e762b7aa8444f23464dcdef21a7d7d4755802bd9a1e55",
+      "size": 623
+    },
+    {
+      "path": "README.md",
+      "sha256": "fa982ad4fa47950c21e0b22ff181dbc234a9c22f305d5c869999bf0ea9414548",
+      "size": 9638
+    },
+    {
+      "path": "build-receipt.py",
+      "sha256": "1d98f38c15a4ae27c52bbd1de21b86bf09d8dbe98f2f8360bec0e286ddfc18a4",
+      "size": 2423
+    },
+    {
+      "path": "build-worker.sh",
+      "sha256": "d88931830d97d670d0208f48ee1513af326da4aac21a1e92827ae4db6954aa5a",
+      "size": 1485
+    },
+    {
+      "path": "image-inputs.json",
+      "sha256": "93469c0e0e008f3674c7087ee132f58af150b7e7a46e9ef31c5fc37af4909237",
+      "size": 901
+    },
+    {
+      "path": "materialize.py",
+      "sha256": "9b79c531c58e2011793b876672ce8956f1d688d3ecf0651228a4bcf0ccf02be1",
+      "size": 16478
+    },
+    {
+      "path": "requirements.lock",
+      "sha256": "c3d6be97d3acd72eb0bb0a0b2a8f1d95049398f3eaf77fe8d3c27007d480ed0d",
+      "size": 677
+    },
+    {
+      "path": "supervisor.py",
+      "sha256": "a0607a895c3eff60166da62b42aff2d468bedf1cb45772463e2af7cb4cfd2af5",
+      "size": 3198
+    },
+    {
+      "path": "test_materialize.py",
+      "sha256": "b6744c5cc6c854eefbdf55a6c72283ed5dfac62607e62579bcd4ea9b7dea1e7d",
+      "size": 12403
+    },
+    {
+      "path": "test_supervisor.py",
+      "sha256": "5cb18b180a009f6cf5d9ec7391e2667f0d411082f5c8829e61be7a290ee102fd",
+      "size": 3190
+    },
+    {
+      "path": "worker.py",
+      "sha256": "664e77f6f4fcfe77dbc82d95646db1310bc7b13bcc1506cedcb40302f835d00b",
+      "size": 1277
+    }
+  ]
+}

@@ -360,27 +360,29 @@ async function main() {
   // ── CBP-1 (Checkpoint Bridge Protocol, 2026-07-05): after the existing per-item commit loop
   // above, ALSO sync the distilled item texts + a checkpoint marker into _STATE/<agent>.json via
   // mem.mjs state-sync, so cold-resume-test.mjs / any fresh instance can see what was just learned
-  // without replaying the whole ledger. Wrapped in try/catch so a failure here never breaks the
-  // existing commit behavior above (fail-open, matches this script's exit-0-always contract).
+  // without replaying the whole ledger. The catch preserves the reflection diagnostics, but an
+  // unconfirmed state checkpoint makes this run exit non-zero so callers cannot report completion.
+  let stateSyncFailed = false;
   if (COMMIT && items.length) {
     try {
       const factsJson = JSON.stringify(items.map((it) => it.text));
       const syncSource = process.env.KB_SYNC_SOURCE || "stop";
       const sessionId = process.env.KB_SESSION_ID || "";
       execFileSync("node", [join(HERE, "mem.mjs"), "state-sync", "--agent", AGENT, "--facts", factsJson, "--source", syncSource, "--session-id", sessionId], { stdio: ["ignore", "ignore", "pipe"] });
-    } catch (e) { console.error("  state-sync failed (non-fatal, checkpoint marker only, no memory content lost): " + String(e.stderr || e.message || e).trim().slice(0, 300)); }
+    } catch (e) {
+      stateSyncFailed = true;
+      console.error("  state-sync failed: durable state checkpoint was not confirmed, so this run will exit non-zero. " + String(e.stderr || e.message || e).trim().slice(0, 300));
+    }
   }
   // A plain container-log summary line: even where stdout/stderr both end up redirected to
   // /dev/null by a caller (kb-inject.sh's three invocations of this script do exactly that), a
   // human or a future audit grepping raw logs for "LOST WRITE" or this summary still finds the
   // fallback file's path named right here, once, unconditionally.
   if (COMMIT) console.log(`reflect: ${items.length - failures}/${items.length} lesson(s) committed${failures ? `, ${failures} LOST (recovered to ${FAILED_WRITE_FILE(AGENT)})` : ""}.`);
-  // FAIL LOUD tail (2026-08-28): the LLM-failure signal set far above (before the commit loop) is
-  // what decides the exit code here, NOT anything in the commit loop -- a commit-write failure
-  // (LOST WRITE, handled above via the local fallback) never turns a real "the model ran fine" run
-  // into a failure, and conversely a successful salvage commit of fallback-derived items never turns
-  // a real LLM failure into a success. Two independent signals, on purpose.
-  process.exit(llmError ? 1 : 0);
+  // FAIL LOUD tail: an LLM failure or an unconfirmed state checkpoint decides the exit code. A
+  // per-item lesson write failure is retained in its local fallback and does not itself change a
+  // successful LLM result. A successful salvage commit also never converts an LLM failure to success.
+  process.exit(llmError || stateSyncFailed ? 1 : 0);
 }
 // GUARDED (2026-08-18): only run the CLI flow (which calls process.exit()) when this file is the
 // entry point, not merely imported. Previously main() ran unconditionally at module load, so even
