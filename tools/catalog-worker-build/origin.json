@@ -1,6 +1,6 @@
 {
   "origin_repository": "InnerScopeHearing/otchealth-cto",
-  "source_commit": "d47fc97eeccba929577445280d122fea09c59785",
+  "source_commit": "bf605fd318a55ae969933171c6dec6582c11ffd8",
   "component_path": "tools/neptune-trial/catalog-materializer",
   "files": [
     {
@@ -9,9 +9,14 @@
       "size": 116
     },
     {
+      "path": "COVERAGE.md",
+      "sha256": "0acf24534855da5d2641b5592e1c16368057b54d7719e3475853b562c2286758",
+      "size": 3623
+    },
+    {
       "path": "Dockerfile",
-      "sha256": "3f01061927546274fe3e762b7aa8444f23464dcdef21a7d7d4755802bd9a1e55",
-      "size": 623
+      "sha256": "f254b667a78a18be987d00b8578920c37a614f90d13f5a81582017fd0ce1d6d4",
+      "size": 749
     },
     {
       "path": "README.md",
@@ -19,9 +24,14 @@
       "size": 9638
     },
     {
+      "path": "RECONCILIATION.md",
+      "sha256": "b6280a9cb1583c3de556fa201d7667f10feeb98ac14030fc0fd61366ee8cc1eb",
+      "size": 3203
+    },
+    {
       "path": "build-receipt.py",
-      "sha256": "1d98f38c15a4ae27c52bbd1de21b86bf09d8dbe98f2f8360bec0e286ddfc18a4",
-      "size": 2423
+      "sha256": "c823a78fa9af3eb8d36ccc628111133c51dc2a53022d48bb3017fe6c12f55ae7",
+      "size": 2556
     },
     {
       "path": "build-worker.sh",
@@ -29,14 +39,34 @@
       "size": 1485
     },
     {
+      "path": "coverage-input-template.json",
+      "sha256": "8380459dc41a44b1a91fca3826004ec476d844a7f28bbbda1c9c3db29de5dfd2",
+      "size": 218
+    },
+    {
+      "path": "coverage-report-template.json",
+      "sha256": "9ab66cf84dbbb9135d71b0802bf9d7b1e76f440bf3435ca530ad45d5e5253e6e",
+      "size": 2083
+    },
+    {
+      "path": "coverage_report.py",
+      "sha256": "7942a3686bb27636c7a4a527cf6a225ee170a3fd21e9d398fa52e2dec697fc5b",
+      "size": 15230
+    },
+    {
       "path": "image-inputs.json",
       "sha256": "93469c0e0e008f3674c7087ee132f58af150b7e7a46e9ef31c5fc37af4909237",
       "size": 901
     },
     {
+      "path": "inventory_census.py",
+      "sha256": "608c0b8ba5d69e20036b4abb9214c9632ef8b36438b006a6624a1ff20bebd047",
+      "size": 11006
+    },
+    {
       "path": "materialize.py",
-      "sha256": "9b79c531c58e2011793b876672ce8956f1d688d3ecf0651228a4bcf0ccf02be1",
-      "size": 16478
+      "sha256": "332b189a7d0768fdd37f6d6be8cad78dbc17cd8a4e7311488bdf8a13607ee5ec",
+      "size": 19679
     },
     {
       "path": "requirements.lock",
@@ -49,9 +79,24 @@
       "size": 3198
     },
     {
+      "path": "test_coverage_report.py",
+      "sha256": "24fd5143669bea9c2b4bc273bd6564077d37c5bba709c0707189f933ff4605ee",
+      "size": 11189
+    },
+    {
+      "path": "test_inventory_census.py",
+      "sha256": "c8fe61f142ecf02d4f2ff83745350668a8f9722f2cec99bcf7f13d5e586b3dfa",
+      "size": 5805
+    },
+    {
+      "path": "test_inventory_integration.py",
+      "sha256": "9eb0669044d40d99ef00930ba2e26b582707c72f12894860d18da64c17f47e0e",
+      "size": 3652
+    },
+    {
       "path": "test_materialize.py",
-      "sha256": "b6744c5cc6c854eefbdf55a6c72283ed5dfac62607e62579bcd4ea9b7dea1e7d",
-      "size": 12403
+      "sha256": "ad3758a13307d18c191920949bd4e319914cce9a9eae121fc22e6e5ff2a025c0",
+      "size": 13885
     },
     {
       "path": "test_supervisor.py",

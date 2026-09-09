@@ -10,6 +10,7 @@ import re
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
+from inventory_census import InventoryCensus
 
 BUCKET = "otchealth-finance-legal-dr-55c84f6b"
 SOURCE = "otchealthcfodata/cfo-source-docs/_CATALOG/catalog.jsonl"
@@ -21,6 +22,32 @@ FIELDS = ("path", "sha256", "sidecar", "enriched", "enriched_sha256", "err",
           "doc_date", "entity", "entities", "named_entities_orgs",
           "named_entities_people", "signatories", "counterparty")
 SHA = re.compile(r"^[a-f0-9]{64}$")
+IDENTITY_FIELDS = ("source_record_id", "source_system", "tenant_id", "organization_id",
+                   "contact_id", "invoice_id", "issuing_organization_id", "case_id",
+                   "court_system", "jurisdiction", "structured_identifiers", "identity_records")
+IDENTITY_SCOPES = {"organization": ("organization_id", "source_system", "tenant_id"),
+                   "contact": ("contact_id", "source_system", "tenant_id"),
+                   "invoice": ("invoice_id", "source_system", "tenant_id", "issuing_organization_id"),
+                   "legal_case": ("case_id", "court_system", "jurisdiction")}
+
+
+def identity_field_census():
+    return {"rows": 0, "fields_present": dict.fromkeys(IDENTITY_FIELDS, 0),
+            "nonempty_string_fields": dict.fromkeys(IDENTITY_FIELDS, 0),
+            "scoped_field_combinations": dict.fromkeys(IDENTITY_SCOPES, 0)}
+
+
+def count_identity_fields(census, row):
+    # Fixed field names and counts only. Never retain names, paths, IDs or bodies.
+    census["rows"] += 1
+    for field in IDENTITY_FIELDS:
+        if field in row:
+            census["fields_present"][field] += 1
+        if isinstance(row.get(field), str) and row[field].strip():
+            census["nonempty_string_fields"][field] += 1
+    for kind, fields in IDENTITY_SCOPES.items():
+        if all(isinstance(row.get(field), str) and row[field].strip() for field in fields):
+            census["scoped_field_combinations"][kind] += 1
 
 
 class Refused(Exception):
@@ -60,8 +87,11 @@ def safe_path(value):
 
 def validate(event):
     fields = {"operation", "source_version_id", "cohort_id", "policy_sha256", "source_prefixes"}
-    require(type(event) is dict and set(event) in (fields, fields | {"source_scope"}), "request_shape")
+    require(type(event) is dict and fields <= set(event) <= fields | {"source_scope", "reconcile_inventory"}, "request_shape")
     require(event["operation"] in ("inspect", "publish"), "operation_invalid")
+    if "reconcile_inventory" in event:
+        require(event["reconcile_inventory"] is True and event["operation"] == "inspect"
+                and event.get("source_scope") == "all_cfo_source_documents", "inventory_scope_invalid")
     version = event["source_version_id"]
     require(isinstance(version, str) and 0 < len(version) <= 1024
             and version != "null" and not re.search(r"[\x00-\x20\x7f]", version), "source_version_invalid")
@@ -83,9 +113,11 @@ def authorize(event, authorizations, now):
     require(len(matches) == 1, "authority_mismatch")
     allowed = matches[0]
     fields = {"cohort_id", "policy_sha256", "source_prefixes", "source_version_id", "allow_publish", "expires_at"}
-    require(set(allowed) == (fields | ({"source_scope"} if "source_scope" in event else set()))
+    optional = {k for k in ("source_scope", "reconcile_inventory") if k in event}
+    require(set(allowed) == (fields | optional)
             and type(allowed["allow_publish"]) is bool, "authority_invalid")
     require(allowed.get("source_scope") == event.get("source_scope"), "authority_mismatch")
+    require(allowed.get("reconcile_inventory") is event.get("reconcile_inventory"), "authority_mismatch")
     require(all(allowed[k] == event[k] for k in ("cohort_id", "policy_sha256", "source_version_id"))
             and type(allowed["source_prefixes"]) is list
             and sorted(allowed["source_prefixes"]) == sorted(event["source_prefixes"]), "authority_mismatch")
@@ -202,6 +234,9 @@ def _materialize(event, s3, authorizations, now, publication_state):
         source["Body"].close()
         raise Refused("source_pin_mismatch")
     counts = {"source_rows": 0, "eligible_rows": 0, "duplicate_rows": 0, "excluded": {}}
+    raw_identity = identity_field_census()
+    eligible_identity = identity_field_census()
+    inventory = InventoryCensus(safe_path) if event.get("reconcile_inventory") else None
     source_hash = hashlib.sha256()
     output_hash = hashlib.sha256()
     seen = {}
@@ -218,7 +253,11 @@ def _materialize(event, s3, authorizations, now, publication_state):
             except (ValueError, UnicodeError):
                 raise Refused("source_json_invalid") from None
             require(type(row) is dict, "source_row_invalid")
+            if event["operation"] == "inspect":
+                count_identity_fields(raw_identity, row)
             why = reason(row, event["source_prefixes"], event.get("source_scope") == "all_cfo_source_documents")
+            if inventory is not None:
+                inventory.observe(row, why)
             if why:
                 counts["excluded"][why] = counts["excluded"].get(why, 0) + 1
                 continue
@@ -235,12 +274,20 @@ def _materialize(event, s3, authorizations, now, publication_state):
                 counts["duplicate_rows"] += 1
                 continue
             seen[identity] = row_hash
+            if event["operation"] == "inspect":
+                count_identity_fields(eligible_identity, row)
             line = selected + b"\n"
             output_size += len(line)
             require(output_size <= MAX_BYTES, "publication_size_limit")
             output.write(line)
             output_hash.update(line)
             counts["eligible_rows"] += 1
+        inventory_result = None
+        if inventory is not None:
+            def inventory_authorized():
+                authorize(event, authorizations, now)
+                head_current(s3, version)
+            inventory_result = inventory.reconcile(s3, inventory_authorized)
         head_current(s3, version)
         authorize(event, authorizations, now)
         catalog_hash = output_hash.hexdigest()
@@ -258,7 +305,12 @@ def _materialize(event, s3, authorizations, now, publication_state):
             binding["source_scope"] = event["source_scope"]
         if event["operation"] == "inspect" or counts["eligible_rows"] == 0:
             return {**binding, "status": "inspected" if counts["eligible_rows"] else "not_ready_no_eligible_rows",
-                    "published": False}
+                    "published": False, **({"identity_field_census": {
+                        "schema": "structured-identity-field-census-v1", "raw_catalog": raw_identity,
+                        "eligible_unique_rows": eligible_identity, "authority_verified": False,
+                        "scope": "top_level_field_availability_only", "nested_values_inspected": False,
+                        "identity_projection_performed": False}} if event["operation"] == "inspect" else {}),
+                    **({"inventory_reconciliation": inventory_result} if inventory_result is not None else {})}
         binding_hash = digest(encode(binding))
         key = f"{DEST}{event['cohort_id']}/{binding_hash}/{catalog_hash}.jsonl"
         output.seek(0)
