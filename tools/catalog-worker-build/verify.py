@@ -8,7 +8,7 @@ COMPONENT = "tools/neptune-trial/catalog-materializer"
 
 def safe_path(value):
     p = PurePosixPath(value)
-    if not value or p.is_absolute() or ".." in p.parts or "\\" in value: raise ValueError("unsafe path")
+    if not value or value == "." or p.is_absolute() or ".." in p.parts or "\\" in value or ":" in value: raise ValueError("unsafe path")
     return p
 
 def digest(path):
@@ -27,7 +27,7 @@ def main():
     p.add_argument("--expected-source-commit", required=True)
     p.add_argument("--receipt", required=True)
     p.add_argument("--manifest", default=str(Path(__file__).with_name("origin.json")))
-    p.add_argument("--component-dir", default=str(Path(__file__).with_name("vendor")))
+    p.add_argument("--component-dir", default=COMPONENT)
     a = p.parse_args()
     if len(a.expected_source_commit) != 40 or any(c not in "0123456789abcdef" for c in a.expected_source_commit): raise SystemExit("expected source commit must be 40 lowercase hex")
     manifest = json.loads(Path(a.manifest).read_text("utf-8"))
@@ -39,9 +39,12 @@ def main():
     for entry in files:
         try: key = str(safe_path(entry["path"]))
         except (KeyError, ValueError): raise SystemExit("unsafe manifest path")
-        if key in expected or not isinstance(entry.get("size"), int) or entry["size"] < 0 or len(entry.get("sha256", "")) != 64: raise SystemExit("invalid manifest entry")
+        if key in expected or not isinstance(entry.get("size"), int) or entry["size"] < 0 or len(entry.get("sha256", "")) != 64 or any(c not in "0123456789abcdef" for c in entry["sha256"]): raise SystemExit("invalid manifest entry")
         expected[key] = entry
-    root = Path(a.component_dir).resolve()
+    root = Path(a.component_dir)
+    for ancestor in (root, *root.parents):
+        if ancestor.is_symlink(): raise SystemExit("symlink or junction found in component path")
+    root = root.resolve()
     actual = {}
     for path in root.rglob("*"):
         if path.is_symlink(): raise SystemExit("symlink found in vendor component")
