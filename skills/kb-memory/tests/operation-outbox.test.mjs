@@ -402,7 +402,9 @@ test("same-process retry after an unknown shared write releases the live lock an
     privateStore,
     sharedStore,
     outboxHome: home,
-    deadlineMs: 80,
+    // The deadline begins before synchronous durable outbox staging. Leave enough headroom for
+    // slow CI filesystems so this fixture reaches its intended lost shared-response boundary.
+    deadlineMs: 1500,
   };
   try {
     await assert.rejects(
