@@ -41,6 +41,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { writeAdvisory, RING_DENY } from "./dedupe.mjs";
 import { parseNdjson, serializeNdjson, nextId, isConflict, condHeaders } from "./blobwrite.mjs";
+import { appendSharedCas, compareSharedRows } from "./shared-feed-append.mjs";
 import { kvSecret } from "./azure-secret.mjs";
 import { linkFields, walkGraph, formatEdge } from "./entity-graph.mjs";
 import { assertAliasOwner, buildAliasEntry, resolveAliasTarget } from "./entity-alias.mjs";
@@ -48,6 +49,7 @@ import { assertCrossLaneAllowed } from "./lane-policy.mjs";
 import { getTextFromS3, getTextMetaFromS3, putObjectToS3, listBlobsFromS3, s3Configured } from "./s3-blob.mjs";
 import { awsCredsPresent } from "./aws-secret.mjs";
 import { FAILED_WRITE_FILE, appendFailedWriteFallback } from "./local-fallback.mjs";
+import { commitKeyedMemoryWrite } from "./keyed-memory-write.mjs";
 import { redactSecrets } from "./redact.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url)); // for spawning sibling scripts (index-one.mjs)
 
@@ -121,9 +123,11 @@ const TAGS = (takeVal("--tags", "") || "").split(",").map((s) => s.trim()).filte
 const SOURCE = takeVal("--source", "");
 const WAS = takeVal("--was", "");
 const SUPERSEDES = takeVal("--supersedes", "");
+const IDEMPOTENCY_KEY = takeVal("--idempotency-key", "");
 const SHARE = argv.includes("--share");
 const N = parseInt(takeVal("--n", "40"), 10) || 40;
 const QUERY = takeVal("--query", "");
+let ACTIVE_OPERATION = null;
 
 // ---- Secret Manager (claude-driver SA) ----
 // Resolve the claude-driver SA from the env var OR, failing that, from disk. This closes the
@@ -223,8 +227,9 @@ const RETRYABLE = new Set([403, 408, 429, 500, 502, 503, 504]);
 async function fetchRetry(u, opts, tries = 4) {
   let last;
   for (let a = 0; a < tries; a++) {
+    if (opts?.signal?.aborted) throw opts.signal.reason || new Error("fetch aborted");
     try { const r = await fetch(u, opts); if (r.status === 404 || r.ok || !RETRYABLE.has(r.status) || a === tries - 1) return r; last = r; }
-    catch (e) { last = e; if (a === tries - 1) throw e; }
+    catch (e) { last = e; if (opts?.signal?.aborted || a === tries - 1) throw e; }
     await new Promise((s) => setTimeout(s, 300 * Math.pow(2, a)));
   }
   return last;
@@ -235,15 +240,14 @@ async function fetchRetry(u, opts, tries = 4) {
 // history found", never an error the caller has to handle. Two tries only (not the full 4): this is
 // a best-effort enrichment on the hot path, not the authoritative read, so it must not multiply
 // mem.mjs's latency chasing a store that may never answer.
-async function azureGetBestEffort(name) {
+async function azureGetBestEffort(name, signal) {
   if (!AZ_SAS) return null;
-  try { const r = await fetchRetry(url(name), undefined, 2); return r && r.ok ? await r.text() : null; }
+  try { const r = await fetchRetry(url(name), signal ? { signal } : undefined, 2); return r && r.ok ? await r.text() : null; }
   catch { return null; }
 }
 // Merge two ndjson blobs by entry `id` (S3 wins a same-id collision, since it is the authoritative,
-// more-recent copy going forward), then resort by `id` — ids are `YYYYMMDD-NNN[-xxxx]`, lexicographic
-// order IS chronological order, so this reconstructs a coherent append-order across two sources
-// without needing to trust either source's own on-disk ordering.
+// more-recent copy going forward), then restore chronological order from the entry timestamp. New
+// gateway IDs carry a random suffix, so the ID is only a deterministic tie breaker.
 function mergeJsonlText(s3Text, azureText) {
   if (!azureText) return s3Text; // the overwhelmingly common case once a ledger has been consolidated
 
@@ -262,7 +266,7 @@ function mergeJsonlText(s3Text, azureText) {
   const byId = new Map();
   for (const r of azureRows) if (r && r.id) byId.set(r.id, r);
   for (const r of parseNdjson(s3Text)) if (r && r.id) byId.set(r.id, r); // S3 overwrites Azure on collision
-  const rows = [...byId.values()].sort((a, b) => (a.id || "").localeCompare(b.id || ""));
+  const rows = [...byId.values()].sort(compareSharedRows);
   return serializeNdjson(rows);
 }
 async function getText(name) {
@@ -275,12 +279,12 @@ async function getText(name) {
 // ETag-aware read for optimistic concurrency: returns { text, etag } (etag null when the blob is absent).
 // The etag is always S3's (never Azure's): S3 is the only PUT target now, so it is the only etag a
 // conditional write-back needs to be conditioned on.
-async function getTextMeta(name) {
+async function getTextMeta(name, signal) {
   if (S3_WRITES) {
-    const { text: s3Text, etag } = await getTextMetaFromS3(ACCT, A.container, name);
-    return { text: mergeJsonlText(s3Text, await azureGetBestEffort(name)), etag };
+    const { text: s3Text, etag } = await getTextMetaFromS3(ACCT, A.container, name, { signal });
+    return { text: mergeJsonlText(s3Text, await azureGetBestEffort(name, signal)), etag };
   }
-  const r = await fetchRetry(url(name)); if (r.status === 404) return { text: null, etag: null }; if (!r.ok) throw new Error("get " + r.status); return { text: await r.text(), etag: r.headers.get("etag") };
+  const r = await fetchRetry(url(name), signal ? { signal } : undefined); if (r.status === 404) return { text: null, etag: null }; if (!r.ok) throw new Error("get " + r.status); return { text: await r.text(), etag: r.headers.get("etag") };
 }
 async function putText(name, body, ct) {
   if (S3_WRITES) { await putObjectToS3(ACCT, A.container, name, body, ct); return; }
@@ -291,12 +295,12 @@ async function putText(name, body, ct) {
 // failure (isConflict) and reload+retry, unchanged from the Azure-only version of this function.
 // condHeaders() names ("If-Match"/"If-None-Match") are Azure-style casing; s3-blob.mjs lowercases
 // them itself before signing, so passing the SAME helper through to both backends is safe.
-async function putTextCond(name, body, ct, etag) {
+async function putTextCond(name, body, ct, etag, signal) {
   if (S3_WRITES) {
-    try { const res = await putObjectToS3(ACCT, A.container, name, body, ct, condHeaders(etag)); return { ok: true, status: 200, etag: res.etag, text: async () => "" }; }
+    try { const res = await putObjectToS3(ACCT, A.container, name, body, ct, condHeaders(etag), { signal }); return { ok: true, status: 200, etag: res.etag, text: async () => "" }; }
     catch (e) { return { ok: false, status: e.status || 500, text: async () => String(e.message || e) }; }
   }
-  return fetchRetry(url(name), { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob", "Content-Type": ct || "text/plain; charset=utf-8", ...condHeaders(etag) }, body });
+  return fetchRetry(url(name), { method: "PUT", signal, headers: { "x-ms-blob-type": "BlockBlob", "Content-Type": ct || "text/plain; charset=utf-8", ...condHeaders(etag) }, body });
 }
 // Atomically append to the JSONL ledger under optimistic concurrency. `buildEntry(freshRows)` MUST
 // recompute everything it needs (id via nextId, supersedes, etc.) from the rows it is handed, because
@@ -324,6 +328,29 @@ async function commitAppend(buildEntry, attempts = 6) {
   throw new Error(`kb-memory: append lost the optimistic-concurrency race after ${attempts} attempts (last ${lastConflict}); no data was clobbered`);
 }
 
+async function commitKeyedAppend(buildEntry, intent, wantsShared) {
+  if (wantsShared) await commonsInit();
+  const result = await commitKeyedMemoryWrite({
+    agent: AGENT, callerLane: AGENT, targetLane: ON, idempotencyKey: IDEMPOTENCY_KEY,
+    intent, wantsShared, buildEntry,
+    privateStore: {
+      read: (signal) => getTextMeta(JSONL, signal),
+      write: async (body, etag, signal) => {
+        const response = await putTextCond(JSONL, body, "application/x-ndjson", etag, signal);
+        if (!response.ok) { const error = new Error("put " + response.status + " " + (await response.text()).slice(0, 160)); error.status = response.status; throw error; }
+      },
+    },
+    sharedStore: wantsShared ? {
+      read: (signal) => cGetMeta(sharedKey(AGENT), signal),
+      write: (body, etag, signal) => cPutCond(sharedKey(AGENT), body, etag, signal),
+    } : undefined,
+    onOperation: (operation) => { ACTIVE_OPERATION = operation; },
+  });
+  writeCacheRows(KEYBASE, result.rows);
+  try { await putText(MD, renderMd(result.rows), "text/markdown; charset=utf-8"); } catch {}
+  return result;
+}
+
 // --- the shared EXEC team feed (commons; one file per agent => no cross-agent clobber) ---
 const C = AGENTS.commons;
 const SHARED_PREFIX = "_MEMORY/_exec/";
@@ -339,9 +366,9 @@ async function commonsInit() {
   else if (!S3_WRITES) throw new Error("commons creds missing");
 }
 const cUrl = (name) => `https://${C_ACCT}.blob.core.windows.net/${C.container}/${encPath(name)}?${C_SAS}`;
-async function cGetAzureBestEffort(name) {
+async function cGetAzureBestEffort(name, signal) {
   if (!C_SAS) return null;
-  try { const r = await fetchRetry(cUrl(name), undefined, 2); return r && r.ok ? await r.text() : null; }
+  try { const r = await fetchRetry(cUrl(name), { signal }, 2); return r && r.ok ? await r.text() : null; }
   catch { return null; }
 }
 async function cGet(name) {
@@ -351,6 +378,37 @@ async function cGet(name) {
 async function cPut(name, body) {
   if (S3_WRITES) { await putObjectToS3(C_ACCT, C.container, name, body, "application/x-ndjson"); return; }
   const r = await fetchRetry(cUrl(name), { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob", "Content-Type": "application/x-ndjson" }, body }); if (!r.ok) throw new Error("cput " + r.status + " " + (await r.text()).slice(0, 160));
+}
+async function cGetMeta(name, signal) {
+  if (S3_WRITES) {
+    const { text: s3Text, etag } = await getTextMetaFromS3(C_ACCT, C.container, name, { signal });
+    return { text: mergeJsonlText(s3Text, await cGetAzureBestEffort(name, signal)), etag };
+  }
+  const r = await fetchRetry(cUrl(name), { signal });
+  if (r.status === 404) return { text: null, etag: null };
+  if (!r.ok) throw new Error("cget " + r.status);
+  return { text: await r.text(), etag: r.headers.get("etag") };
+}
+async function cPutCond(name, body, etag, signal) {
+  if (S3_WRITES) {
+    try {
+      await putObjectToS3(C_ACCT, C.container, name, body, "application/x-ndjson", condHeaders(etag), { signal });
+      return;
+    } catch (error) {
+      throw error;
+    }
+  }
+  const r = await fetchRetry(cUrl(name), {
+    method: "PUT",
+    signal,
+    headers: { "x-ms-blob-type": "BlockBlob", "Content-Type": "application/x-ndjson", ...condHeaders(etag) },
+    body,
+  });
+  if (!r.ok) {
+    const error = new Error("cput " + r.status + " " + (await r.text()).slice(0, 160));
+    error.status = r.status;
+    throw error;
+  }
 }
 // AZURE listing, FIXED (2026-08-18): the original `if (!r.ok) break;` returned whatever had
 // accumulated so far (empty, on a first-page failure) as a normal successful result — so an expired
@@ -385,13 +443,25 @@ async function cList(prefix) {
   return cListAzureAll(prefix);
 }
 const sharedKey = (agent) => `${SHARED_PREFIX}${agent}.jsonl`;
-async function publishShared(agent, entry) {
+async function publishShared(agent, entry, operationIntent) {
   if (NO_SHARE.has(agent)) { console.error(`[kb-memory] NOTE: ${agent} is privileged; entry kept in the private lane only (NOT shared to the exec team).`); return false; }
   await commonsInit();
-  const t = await cGet(sharedKey(agent));
-  const rows = t ? t.split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
-  rows.push({ ...entry, agent });
-  await cPut(sharedKey(agent), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const key = sharedKey(agent);
+  const result = await appendSharedCas({
+    read: (signal) => cGetMeta(key, signal),
+    write: (body, etag, signal) => cPutCond(key, body, etag, signal),
+    entry,
+    agent,
+    callerLane: AGENT,
+    idempotencyKey: IDEMPOTENCY_KEY || undefined,
+    idempotencyIntent: operationIntent || { command: cmd, text: TEXT, tags: TAGS, source: SOURCE, was: WAS, supersedes: SUPERSEDES, target: ON },
+  });
+  if (result.durability === "UNKNOWN") {
+    console.error("SHARED_PUBLICATION_RESULT " + JSON.stringify({ durability: "UNKNOWN", entry_id: result.entry?.id, retry_with_same_key: result.retry_with_same_key }));
+    const error = new Error(result.reason);
+    Object.assign(error, result);
+    throw error;
+  }
   return true;
 }
 async function readSharedAll() {
@@ -406,7 +476,7 @@ async function readSharedAll() {
 //      no network) and refreshes from Blob only on a throttle, so continuous injection never hits Azure
 //      on every prompt (the "network on every turn" cost). A mem write updates the cache immediately
 //      (write-through), so a just-stated fact is recallable on the very next prompt. Fail-open.
-const CACHE_DIR = `${homedir()}/.claude/kb-cache`;
+const CACHE_DIR = takeVal("--cache-dir", "") || `${homedir()}/.claude/kb-cache`;
 const cacheFile = (kb) => `${CACHE_DIR}/${kb}.jsonl`;
 const TEAM_CACHE = `${CACHE_DIR}/_team.jsonl`;
 const toNdjson = (rows) => rows.map((r) => JSON.stringify(r)).join("\n") + "\n";
@@ -512,21 +582,29 @@ function renderMd(rows) {
 async function append(type, share) {
   if (!TEXT) { console.error(`need text: mem.mjs ${type} "<text>" --agent <a>`); process.exit(2); }
   await initStore();
-  // CROSS-LANE (writing ON another agent's ledger): APPEND-ONLY + ATTRIBUTED. A cross write can NEVER
-  // supersede/overwrite the owner's (or anyone's) entry — a cross 'correct' is an annotation the OWNER
-  // reconciles on wake. Same-lane writes keep full supersede semantics. Every entry carries by=<writer>.
   const supersedes = CROSS ? undefined : (SUPERSEDES || undefined);
-  // Optimistic-concurrency append: buildEntry recomputes the id from the FRESH rows on every attempt,
-  // so a concurrent writer from the other engine can never be clobbered and ids never collide.
-  const { rows, entry } = await commitAppend((freshRows) => {
-    // Non-blocking write-time advisory (dedupe/contradiction). Never blocks the write.
+  const wantsShared = (share || type === "status") && !NO_SHARE.has(AGENT);
+  const intent = { command: type, text: TEXT, tags: TAGS, source: SOURCE, was: WAS, supersedes: SUPERSEDES, target: ON, share: wantsShared };
+  if (IDEMPOTENCY_KEY) {
+    ACTIVE_OPERATION = stageOperation({
+      agent: AGENT, callerLane: AGENT, targetLane: ON, idempotencyKey: IDEMPOTENCY_KEY,
+      intent, wantsShared,
+    });
+  }
+  const buildEntry = (freshRows) => {
     if (!supersedes) writeAdvisory(TEXT, freshRows, type);
     return { id: newId(freshRows), ts: new Date().toISOString(), type, text: TEXT, tags: TAGS, by: AGENT, source: SOURCE || undefined, was: WAS || undefined, supersedes };
-  });
-  let shared = false;
-  if (share || type === "status") shared = await publishShared(AGENT, entry);
+  };
+  let rows, entry, shared = false;
+  if (IDEMPOTENCY_KEY) {
+    ({ rows, entry, shared } = await commitKeyedAppend(buildEntry, intent, wantsShared));
+    if ((share || type === "status") && NO_SHARE.has(AGENT)) await publishShared(AGENT, entry, intent);
+  } else {
+    ({ rows, entry } = await commitAppend(buildEntry));
+    if (share || type === "status") shared = await publishShared(AGENT, entry, intent);
+  }
   maybeIndex(entry, shared);
-  emitFleet(entry, shared); // fleet telemetry (env-gated KB_DD_EMIT=1, throttled, fail-open)
+  emitFleet(entry, shared);
   if (CROSS) console.log(`[kb-memory] ${type} BY ${AGENT} -> ON ${ON}'s ledger (${A.ring}) id=${entry.id} [cross-lane note, append-only, no-supersede]. ${ON} ledger now ${rows.length} entries; ${ON} sees it on next wake/reconcile.`);
   else console.log(`[kb-memory] ${type} -> ${AGENT} (${A.ring}) id=${entry.id}. Private ledger ${rows.length} entries${shared ? "; PUBLISHED to exec team feed" : ""}.`);
 }
@@ -1092,8 +1170,13 @@ async function runPack() {
     const item = { type: cmd, text: TEXT, share: SHARE || cmd === "status", tags: ["mem-direct-fallback"] };
     if (cmd === "correct" && WAS) item.was = WAS;
     if (CROSS) item.on = ON;
-    appendFailedWriteFallback(AGENT, item, safeMessage, "mem.mjs");
-    console.error(`[kb-memory] NOT LOST: saved to the local fallback (${FAILED_WRITE_FILE(AGENT)}). Re-run this same command once credentials are restored, or recover the file by hand.`);
+    if (IDEMPOTENCY_KEY) item.idempotency_key = IDEMPOTENCY_KEY;
+    if (ACTIVE_OPERATION) {
+      item.operation_id = ACTIVE_OPERATION.operation_id; item.operation_stage = ACTIVE_OPERATION.stage;
+      item.intent_hash = ACTIVE_OPERATION.intent_hash; item.private_entry_id = ACTIVE_OPERATION.private_entry_id;
+    }
+    appendFailedWriteFallback(AGENT, item, safeMessage, "mem.mjs", { cacheDir: CACHE_DIR });
+    console.error(`[kb-memory] NOT LOST: saved to the local fallback (${FAILED_WRITE_FILE(AGENT, CACHE_DIR)}). Re-run this same command once credentials are restored, or recover the file by hand.`);
   }
   process.exit(1);
 });

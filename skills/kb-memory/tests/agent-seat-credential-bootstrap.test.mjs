@@ -139,10 +139,9 @@ test("aws-secret.mjs's awsCreds() checks paths in the documented order: ECS role
 });
 
 // ---- mem.mjs DIRECT CLI: fail-loud + durable local fallback (spawn-based, real end-to-end proof) ---
-function spawnMem(args, { home, env: extraEnv = {} } = {}) {
+function spawnMem(args, { cacheDir, env: extraEnv = {} } = {}) {
   const env = {
     ...process.env,
-    HOME: home,
     ...NO_CREDS,
     AZURE_SP_CLIENT_ID: undefined, AZURE_SP_CLIENT_SECRET: undefined, AZURE_SP_TENANT_ID: undefined,
     IDENTITY_ENDPOINT: undefined, IDENTITY_HEADER: undefined,
@@ -151,7 +150,7 @@ function spawnMem(args, { home, env: extraEnv = {} } = {}) {
     // get-access-token` (azure-secret.mjs azCliToken) as one of its four auth paths, and on a FRESH
     // $HOME the real Azure CLI both creates $HOME/.azure and spawns a DETACHED python uploader that
     // keeps writing into it after the az process itself has exited. That async writer raced
-    // withTempHome()'s teardown, which is why CI failed with ENOTEMPTY on rmdir '<tmp>/.azure'.
+    // withTempCache()'s teardown, which is why CI failed with ENOTEMPTY on rmdir '<tmp>/.azure'.
     // TWO pieces of evidence from run 32175770849, not inference: the rmdir error names .azure
     // specifically, and the job's own cleanup reports orphaned `python3` processes still alive at
     // job end (the real az CLI is Python).
@@ -170,9 +169,9 @@ function spawnMem(args, { home, env: extraEnv = {} } = {}) {
   // "undefined" (the string) is NOT the same as an absent one, and several of these guards check
   // presence via `-n`/truthiness, so a stray literal "undefined" string would be misread as "set".
   for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
-  return spawnSync(process.execPath, [MEM_MJS, ...args], { encoding: "utf8", env, timeout: 30_000 });
+  return spawnSync(process.execPath, [MEM_MJS, ...args, "--cache-dir", cacheDir], { encoding: "utf8", env, timeout: 30_000 });
 }
-async function withTempHome(run) {
+async function withTempCache(run) {
   const dir = await mkdtemp(join(tmpdir(), "mem-credboot-test-"));
   // `force: true` only swallows ENOENT -- it does NOT help when a directory is repopulated mid-walk.
   // maxRetries/retryDelay are the documented remedy for exactly the EBUSY/ENOTEMPTY/EPERM class this
@@ -180,11 +179,11 @@ async function withTempHome(run) {
   // normal path the first attempt succeeds and neither option costs anything.
   try { return await run(dir); } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 }
-const fallbackFile = (home, agent) => join(home, ".claude", "kb-cache", `_failed_writes-${agent}.jsonl`);
+const fallbackFile = (cacheDir, agent) => join(cacheDir, `_failed_writes-${agent}.jsonl`);
 
 test("mem.mjs status: with zero resolvable credentials, exits non-zero with a NAMED AWS-credential error (not a bare 'Command failed')", async () => {
-  await withTempHome(async (home) => {
-    const r = spawnMem(["status", "a real checkpoint that must not be lost", "--agent", "zzz-test-status"], { home });
+  await withTempCache(async (cacheDir) => {
+    const r = spawnMem(["status", "a real checkpoint that must not be lost", "--agent", "zzz-test-status"], { cacheDir });
     assert.notEqual(r.status, 0, "must fail (no credentials can possibly succeed here)");
     assert.match(r.stderr, /ERROR:.*AWS credentials unavailable/, "the failure must name the actual cause, not a generic error");
     assert.match(r.stderr, /OTC_AWS_ACCESS_KEY_ID/, "the failure must name the specific env var that would fix it");
@@ -192,11 +191,11 @@ test("mem.mjs status: with zero resolvable credentials, exits non-zero with a NA
 });
 
 test("mem.mjs status: the SAME failure saves the lost content to the durable local fallback file, not just to stderr", async () => {
-  await withTempHome(async (home) => {
+  await withTempCache(async (cacheDir) => {
     const text = "smoke-test checkpoint content that proves nothing is lost";
-    const r = spawnMem(["status", text, "--agent", "zzz-test-status"], { home });
+    const r = spawnMem(["status", text, "--agent", "zzz-test-status"], { cacheDir });
     assert.notEqual(r.status, 0);
-    const file = fallbackFile(home, "zzz-test-status");
+    const file = fallbackFile(cacheDir, "zzz-test-status");
     assert.ok(existsSync(file), `fallback file must exist at ${file}`);
     const rows = (await readFile(file, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(rows.length, 1);
@@ -213,7 +212,7 @@ test("mem.mjs status: the SAME failure saves the lost content to the durable loc
 });
 
 test("mem.mjs remember/decision/pitfall/correct all reach the same fallback net, not just status", async () => {
-  await withTempHome(async (home) => {
+  await withTempCache(async (cacheDir) => {
     const cases = [
       { args: ["remember", "a fact that must survive", "--agent", "zzz-test-multi"], type: "remember" },
       { args: ["decision", "a decision that must survive", "--agent", "zzz-test-multi"], type: "decision" },
@@ -221,10 +220,10 @@ test("mem.mjs remember/decision/pitfall/correct all reach the same fallback net,
       { args: ["correct", "the corrected fact", "--agent", "zzz-test-multi", "--was", "the wrong prior belief"], type: "correct" },
     ];
     for (const c of cases) {
-      const r = spawnMem(c.args, { home });
+      const r = spawnMem(c.args, { cacheDir });
       assert.notEqual(r.status, 0, `${c.type} must fail with no credentials`);
     }
-    const rows = (await readFile(fallbackFile(home, "zzz-test-multi"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const rows = (await readFile(fallbackFile(cacheDir, "zzz-test-multi"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(rows.length, cases.length, "every one of the 4 failed writes must be preserved, none dropped");
     assert.deepEqual(rows.map((r) => r.type), cases.map((c) => c.type));
     const correctRow = rows.find((r) => r.type === "correct");
@@ -233,17 +232,17 @@ test("mem.mjs remember/decision/pitfall/correct all reach the same fallback net,
 });
 
 test("mem.mjs whoami (a READ-only diagnostic verb): failing with no credentials does NOT write a fallback file -- there is no content to lose", async () => {
-  await withTempHome(async (home) => {
-    spawnMem(["whoami", "--agent", "zzz-test-readonly"], { home });
-    assert.equal(existsSync(fallbackFile(home, "zzz-test-readonly")), false, "a read-only verb must never create a fallback entry");
+  await withTempCache(async (cacheDir) => {
+    spawnMem(["whoami", "--agent", "zzz-test-readonly"], { cacheDir });
+    assert.equal(existsSync(fallbackFile(cacheDir, "zzz-test-readonly")), false, "a read-only verb must never create a fallback entry");
   });
 });
 
 test("mem.mjs status: multiple failures for the SAME agent APPEND to the fallback file (never overwrite), mirroring reflect.mjs's own guarantee", async () => {
-  await withTempHome(async (home) => {
-    spawnMem(["status", "first lost checkpoint", "--agent", "zzz-test-append"], { home });
-    spawnMem(["status", "second lost checkpoint", "--agent", "zzz-test-append"], { home });
-    const rows = (await readFile(fallbackFile(home, "zzz-test-append"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  await withTempCache(async (cacheDir) => {
+    spawnMem(["status", "first lost checkpoint", "--agent", "zzz-test-append"], { cacheDir });
+    spawnMem(["status", "second lost checkpoint", "--agent", "zzz-test-append"], { cacheDir });
+    const rows = (await readFile(fallbackFile(cacheDir, "zzz-test-append"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(rows.length, 2);
     assert.equal(rows[0].text, "first lost checkpoint");
     assert.equal(rows[1].text, "second lost checkpoint");
@@ -251,10 +250,10 @@ test("mem.mjs status: multiple failures for the SAME agent APPEND to the fallbac
 });
 
 test("mem.mjs: a plain USAGE error (no text supplied) exits non-zero but does NOT spuriously create a fallback file -- there is nothing lost, only a typo", async () => {
-  await withTempHome(async (home) => {
-    const r = spawnMem(["status", "--agent", "zzz-test-usage"], { home }); // no text at all
+  await withTempCache(async (cacheDir) => {
+    const r = spawnMem(["status", "--agent", "zzz-test-usage"], { cacheDir }); // no text at all
     assert.notEqual(r.status, 0);
-    assert.equal(existsSync(fallbackFile(home, "zzz-test-usage")), false, "a usage error must not be confused with a lost write");
+    assert.equal(existsSync(fallbackFile(cacheDir, "zzz-test-usage")), false, "a usage error must not be confused with a lost write");
   });
 });
 
@@ -271,7 +270,7 @@ test("mem.mjs's top-level catch is wired to appendFailedWriteFallback for the di
   // are replayed into the ledger by a recovery pass and a row can be share:true, so a credential in
   // an error string would become durable cross-lane content. Pinning BOTH directions -- redacted is
   // passed, raw is not -- is what keeps a future refactor from quietly reverting it.
-  assert.match(tail, /appendFailedWriteFallback\(AGENT, item, safeMessage, "mem\.mjs"\)/);
+  assert.match(tail, /appendFailedWriteFallback\(AGENT, item, safeMessage, "mem\.mjs", \{ cacheDir: CACHE_DIR \}\)/);
   assert.match(tail, /const safeMessage = redactSecrets\(e\.message\)/, "the redaction must happen inside this catch");
   assert.doesNotMatch(tail, /appendFailedWriteFallback\([^)]*e\.message/, "the RAW message must never be what gets persisted");
   assert.match(tail, /WRITE_VERBS = new Set\(\["remember", "fact", "decision", "pitfall", "status", "correct"\]\)/);

@@ -136,7 +136,7 @@ test("mem.mjs and local-fallback.mjs both actually call redactSecrets (wiring, n
   assert.match(mem, /import \{ redactSecrets \} from "\.\/redact\.mjs"/, "mem.mjs must import the redactor");
   assert.match(mem, /const safeMessage = redactSecrets\(e\.message\)/, "mem.mjs's top-level catch must redact before use");
   assert.doesNotMatch(mem, /console\.error\("ERROR: " \+ e\.message\)/, "the raw-message print must be gone, not merely shadowed");
-  assert.match(mem, /appendFailedWriteFallback\(AGENT, item, safeMessage, "mem\.mjs"\)/, "the PERSISTED error must be the redacted one");
+  assert.match(mem, /appendFailedWriteFallback\(AGENT, item, safeMessage, "mem\.mjs", \{ cacheDir: CACHE_DIR \}\)/, "the PERSISTED error must be the redacted one and use the selected cache");
 
   const lf = readFileSync(join(HERE, "..", "local-fallback.mjs"), "utf8");
   assert.match(lf, /error: redactSecrets\(error\)/, "the choke point must redact so reflect.mjs's caller is covered too");
@@ -144,29 +144,21 @@ test("mem.mjs and local-fallback.mjs both actually call redactSecrets (wiring, n
 });
 
 test("a real fallback row written through the choke point carries a redacted error and an intact text", async () => {
-  // NOTE the `async`/`await` here, which is load-bearing rather than stylistic. An earlier draft did
-  // `return import(...).then(...)` inside try/finally: `finally` runs when the promise is RETURNED,
-  // not when it RESOLVES, so HOME was restored before the write ran and the row landed in the real
-  // ~/.claude/kb-cache instead of the temp dir. A test that writes into the operator's actual home
-  // is worse than a failing one, so the lifecycle is awaited end to end.
-  const home = mkdtempSync(join(tmpdir(), "redact-fallback-"));
-  const prevHome = process.env.HOME;
+  const cacheDir = mkdtempSync(join(tmpdir(), "redact-fallback-"));
   try {
-    process.env.HOME = home; // homedir() reads $HOME at CALL time on POSIX, so no re-import is needed
     const { appendFailedWriteFallback, FAILED_WRITE_FILE } = await import("../local-fallback.mjs");
-    const file = FAILED_WRITE_FILE("zzz-redact-test");
-    assert.ok(file.startsWith(home), `the row must be written under the temp HOME, got ${file}`);
+    const file = FAILED_WRITE_FILE("zzz-redact-test", cacheDir);
+    assert.ok(file.startsWith(cacheDir), `the row must be written under the explicit temp cache, got ${file}`);
     const operatorText = "a checkpoint whose content must survive byte for byte";
-    appendFailedWriteFallback("zzz-redact-test", { type: "status", text: operatorText, share: true }, "denied for AKIAIOSFODNN7EXAMPLE", "mem.mjs");
+    appendFailedWriteFallback("zzz-redact-test", { type: "status", text: operatorText, share: true }, "denied for AKIAIOSFODNN7EXAMPLE", "mem.mjs", { cacheDir });
     const lines = readFileSync(file, "utf8").trim().split("\n");
-    assert.equal(lines.length, 1, "exactly one row, proving the temp HOME was in effect for the write");
+    assert.equal(lines.length, 1, "exactly one row was written to the explicit temp cache");
     const row = JSON.parse(lines[0]);
     assert.doesNotMatch(row.error, /AKIAIOSFODNN7EXAMPLE/, "the persisted error must be redacted -- this row gets replayed into a share:true ledger entry");
     assert.match(row.error, /\[REDACTED-AWS-KEY-ID\]/);
-    assert.equal(row.text, operatorText, "the operator's own content must be preserved exactly");
+    assert.equal(row.text, operatorText, "the operator content must be preserved exactly");
     assert.equal(row.share, true);
   } finally {
-    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
-    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    rmSync(cacheDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
