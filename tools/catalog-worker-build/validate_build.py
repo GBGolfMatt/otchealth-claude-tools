@@ -13,6 +13,8 @@ PLATFORMS = {"linux/amd64", "linux/arm64"}
 CRITICAL_SOURCE_FILES = {
     "materialize.py", "worker.py", "supervisor.py", "Dockerfile", ".dockerignore",
     "requirements.lock", "test_materialize.py", "test_supervisor.py", "image-inputs.json",
+    "inventory_census.py", "test_inventory_census.py", "coverage_report.py",
+    "test_coverage_report.py", "test_inventory_integration.py",
 }
 
 

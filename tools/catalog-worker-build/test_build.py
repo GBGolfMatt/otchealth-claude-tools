@@ -14,7 +14,7 @@ VALIDATOR = HERE / "validate_build.py"
 CTO = "a" * 40
 TOOLKIT = "b" * 40
 PLATFORM_DIGESTS = {"linux/amd64": "sha256:" + "d" * 64, "linux/arm64": "sha256:" + "e" * 64}
-CRITICAL = {"materialize.py", "worker.py", "supervisor.py", "Dockerfile", ".dockerignore", "requirements.lock", "test_materialize.py", "test_supervisor.py", "image-inputs.json"}
+CRITICAL = {"materialize.py", "worker.py", "supervisor.py", "Dockerfile", ".dockerignore", "requirements.lock", "test_materialize.py", "test_supervisor.py", "image-inputs.json", "inventory_census.py", "test_inventory_census.py", "coverage_report.py", "test_coverage_report.py", "test_inventory_integration.py"}
 
 
 def write_json(path, value, compact=False):
@@ -100,6 +100,20 @@ class ValidateBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); _, build = receipts(directory)
             build["source_files_sha256"]["worker.py"] = "0" * 64
+            write_json(directory / "receipt.json", build, compact=True)
+            (directory / "receipt.sha256").write_text(hashlib.sha256((directory / "receipt.json").read_bytes()).hexdigest() + "\n", encoding="ascii")
+            self.assertNotEqual(validate(directory).returncode, 0)
+
+    def test_rejects_incomplete_or_extended_critical_input_set(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw); _, build = receipts(directory)
+            build["source_files_sha256"].pop("inventory_census.py")
+            write_json(directory / "receipt.json", build, compact=True)
+            (directory / "receipt.sha256").write_text(hashlib.sha256((directory / "receipt.json").read_bytes()).hexdigest() + "\n", encoding="ascii")
+            self.assertNotEqual(validate(directory).returncode, 0)
+
+            _, build = receipts(directory)
+            build["source_files_sha256"]["unreviewed.py"] = "f" * 64
             write_json(directory / "receipt.json", build, compact=True)
             (directory / "receipt.sha256").write_text(hashlib.sha256((directory / "receipt.json").read_bytes()).hexdigest() + "\n", encoding="ascii")
             self.assertNotEqual(validate(directory).returncode, 0)

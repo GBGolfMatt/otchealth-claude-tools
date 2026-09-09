@@ -102,6 +102,29 @@ def event(operation="inspect", **changes):
 
 
 class MaterializeTests(unittest.TestCase):
+    def test_structured_field_census_counts_raw_and_unique_eligible_without_values(self):
+        identified = row(source_record_id="private-record", organization_id="private-org",
+                         source_system="private-system", tenant_id="private-tenant")
+        excluded = row("finance/excluded.json", sidecar=False, invoice_id="private-invoice")
+        data = raw(identified, identified, excluded)
+        source = FakeS3(data)
+        result = invoke(event(), source)
+        census = result["identity_field_census"]
+        self.assertEqual(census["raw_catalog"]["rows"], 3)
+        self.assertEqual(census["eligible_unique_rows"]["rows"], 1)
+        self.assertEqual(census["raw_catalog"]["scoped_field_combinations"]["organization"], 2)
+        self.assertEqual(census["eligible_unique_rows"]["scoped_field_combinations"]["organization"], 1)
+        self.assertEqual(census["raw_catalog"]["fields_present"]["invoice_id"], 1)
+        self.assertEqual(census["raw_catalog"]["scoped_field_combinations"]["invoice"], 0)
+        self.assertFalse(census["authority_verified"])
+        self.assertNotIn("private-", json.dumps(result))
+        self.assertEqual(source.puts, [])
+
+    def test_identity_census_does_not_change_published_binding_or_project_ids(self):
+        result = invoke(event("publish"), FakeS3(raw(row(organization_id="private-id"))))
+        self.assertNotIn("identity_field_census", result)
+        self.assertNotIn("private-id", json.dumps(result))
+
     def test_inspect_never_writes_and_projects_only_allowed_fields(self):
         data = raw(row(doc_date="2026-01-01T00:00:00.000Z", entities=["Synthetic"]))
         s3 = FakeS3(data)

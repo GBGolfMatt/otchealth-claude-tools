@@ -1,0 +1,9 @@
+{
+  "schema": "catalog-census-input-v1",
+  "finance_inspection": null,
+  "finance_expected_request": null,
+  "company_legal": {
+    "measurement_status": "not_measured"
+  },
+  "unverified_user_document_target": null
+}
