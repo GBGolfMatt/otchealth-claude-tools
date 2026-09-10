@@ -15,6 +15,8 @@ CRITICAL_SOURCE_FILES = {
     "requirements.lock", "test_materialize.py", "test_supervisor.py", "image-inputs.json",
     "inventory_census.py", "test_inventory_census.py", "coverage_report.py",
     "test_coverage_report.py", "test_inventory_integration.py",
+    "repair_plan.py", "repair_runtime.py", "repair_supervisor.py",
+    "test_repair_plan.py", "test_repair_runtime.py",
 }
 
 

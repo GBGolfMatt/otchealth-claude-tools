@@ -1,12 +1,12 @@
 {
   "origin_repository": "InnerScopeHearing/otchealth-cto",
-  "source_commit": "0bf97add6ed0263b954b1320e56e6b0c6ab2ca4f",
+  "source_commit": "d38daf65d1a5ec41f28c63f5b34cde39dee61478",
   "component_path": "tools/neptune-trial/catalog-materializer",
   "files": [
     {
       "path": ".dockerignore",
-      "sha256": "4da7b93ea08363921d9d5305a604bdf778f25252a56e78ceddf30f3b7dde4c70",
-      "size": 239
+      "sha256": "61b2a52922c93cb0b3b6972f8d65f9ed8035c63971d5461dc673e725cc4798fb",
+      "size": 341
     },
     {
       "path": "COVERAGE.md",
@@ -15,8 +15,8 @@
     },
     {
       "path": "Dockerfile",
-      "sha256": "f254b667a78a18be987d00b8578920c37a614f90d13f5a81582017fd0ce1d6d4",
-      "size": 749
+      "sha256": "8dafb372a245078764b7e6f79d8968b387639bcef38c1ba94a85e5ac82f8ef7f",
+      "size": 854
     },
     {
       "path": "README.md",
@@ -29,9 +29,14 @@
       "size": 3203
     },
     {
+      "path": "REPAIR.md",
+      "sha256": "f2849855cb841e2a69782f1043d6cf24cf2d3227f3fdde30ed386b223c30cf96",
+      "size": 3900
+    },
+    {
       "path": "build-receipt.py",
-      "sha256": "c823a78fa9af3eb8d36ccc628111133c51dc2a53022d48bb3017fe6c12f55ae7",
-      "size": 2556
+      "sha256": "768d5a7c69eead52b89f30fbc9238a33ca2a89a3c2f7ba3d72f98a641d9d20a0",
+      "size": 2668
     },
     {
       "path": "build-worker.sh",
@@ -69,6 +74,21 @@
       "size": 19679
     },
     {
+      "path": "repair_plan.py",
+      "sha256": "2fcf1873f5d8fb171c24dc927fb133726b4f72477b4b9f52f48ab3d170042a17",
+      "size": 5589
+    },
+    {
+      "path": "repair_runtime.py",
+      "sha256": "ffa94acb9de94ed6e5b0770ba4f8a1e80ea6dd19b4c8535bd7fbaf19fad1401e",
+      "size": 9183
+    },
+    {
+      "path": "repair_supervisor.py",
+      "sha256": "2c2ffbe433b77db60489a38dc411637a62d08cb1691d083f3beefb03c7f39cdb",
+      "size": 521
+    },
+    {
       "path": "requirements.lock",
       "sha256": "c3d6be97d3acd72eb0bb0a0b2a8f1d95049398f3eaf77fe8d3c27007d480ed0d",
       "size": 677
@@ -102,6 +122,16 @@
       "path": "test_materialize.py",
       "sha256": "ad3758a13307d18c191920949bd4e319914cce9a9eae121fc22e6e5ff2a025c0",
       "size": 13885
+    },
+    {
+      "path": "test_repair_plan.py",
+      "sha256": "1d03b1404a3ed92ddcdd01011b8d077cf9281a669e8ad760c7750835f0749a61",
+      "size": 4044
+    },
+    {
+      "path": "test_repair_runtime.py",
+      "sha256": "77cec7d4a30f8f90136b7ac3eed04fcd4b025bba2de048dbc15ff8e84fdfdde8",
+      "size": 8427
     },
     {
       "path": "test_supervisor.py",

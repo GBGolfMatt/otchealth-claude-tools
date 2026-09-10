@@ -11,3 +11,8 @@
 !test_inventory_census.py
 !test_inventory_integration.py
 !test_coverage_report.py
+!repair_plan.py
+!repair_runtime.py
+!repair_supervisor.py
+!test_repair_plan.py
+!test_repair_runtime.py
