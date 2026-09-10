@@ -16,3 +16,6 @@
 !repair_supervisor.py
 !test_repair_plan.py
 !test_repair_runtime.py
+!publish_inspected.py
+!test_publish_inspected.py
+!PUBLISH-INSPECTED.md

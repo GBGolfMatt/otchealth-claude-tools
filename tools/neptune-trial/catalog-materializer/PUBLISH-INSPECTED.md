@@ -1,0 +1,11 @@
+# Receipt-bound CFO catalog publication
+
+`publish_inspected.py` is a separate operation. It accepts only a complete inspect receipt, its canonical SHA-256, and a deployment-owned file at `/work/inspected-catalog.jsonl`. The invocation supplies neither a source key nor destination keys.
+
+The current inspect worker intentionally keeps its selected catalog in an ephemeral temporary file and returns only the inspect receipt. It does not create `/work/inspected-catalog.jsonl`, so this publisher is not compatible with an independent inspect-only task yet. Do not deploy it until a reviewed source-bound handoff exists. A shared task volume would collapse the inspect and publish boundary, while an immutable staging object would make inspection write-capable. The handoff must preserve inspect-only authorization, bind the staged bytes to the receipt hash, and give the publisher only a version-pinned read of that exact staged object.
+
+The operation checks the receipt is an `inspected` non-publication with a positive eligible count, validates the exact current source catalog VersionId by `HeadObject` before and after persistence, hashes the local catalog file against the inspected content hash and byte count, and derives both immutable destination keys from the receipt binding. It uses conditional puts, reads both objects back, and returns `publication_unknown` after an uncertain write.
+
+Inspection and publication remain separate authorizations. The publish authority must exactly match the inspected cohort, policy hash and source VersionId and must be current with `allow_publish: true`. The publisher never calls `GetObject` for the source catalog and never accepts a caller-selected source or destination key.
+
+The publication role needs `s3:GetObject` on `otchealthcfodata/cfo-source-docs/_CATALOG/catalog.jsonl` because S3 maps `HeadObject` to that IAM action, and `s3:PutObject` plus `s3:GetObject` only below `graph-trial/20260909/materialized-cfo/`. The code never uses source `GetObject`, but AWS cannot distinguish a HEAD from a GET at this IAM action boundary. A role that must be technically incapable of reading source bytes requires a separate currentness broker, which is not introduced here. The role otherwise needs no `ListBucket`, `DeleteObject`, IAM, ACL or role assumption. Apply it as a distinct role from the inspect worker.
