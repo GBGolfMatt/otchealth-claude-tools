@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run in the reviewed existing AWS build workflow, never as a source-data worker.
-# Existing ECR authentication and Depot project authentication are required.
+# Existing ECR authentication and a workflow-provided isolated Buildx builder are required.
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 revision="$(git rev-parse HEAD)"
@@ -10,7 +10,7 @@ test -z "$(git status --porcelain -- "$component")"
 tag="900915535335.dkr.ecr.us-east-1.amazonaws.com/doc-indexer:cfo-catalog-${revision}"
 receipt_dir="${RUNNER_TEMP:?RUNNER_TEMP must point to the existing workflow artifact directory}/cfo-catalog-${revision}"
 mkdir -p "$receipt_dir"
-depot build --project p5k0c551zm --platform linux/amd64,linux/arm64 \
+docker buildx build --platform linux/amd64,linux/arm64 \
   --file "$root/$component/Dockerfile" --provenance=false --sbom=false \
   --label "org.opencontainers.image.revision=$revision" \
   --metadata-file "$receipt_dir/build-metadata.json" \

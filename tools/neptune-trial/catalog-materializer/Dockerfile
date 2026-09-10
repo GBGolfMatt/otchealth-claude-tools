@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
 COPY requirements.lock ./requirements.lock
 RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r requirements.lock
-COPY materialize.py inventory_census.py worker.py supervisor.py test_materialize.py test_inventory_census.py test_supervisor.py ./
+COPY materialize.py inventory_census.py worker.py supervisor.py test_materialize.py test_inventory_census.py test_supervisor.py publish_inspected.py test_publish_inspected.py ./
 COPY coverage_report.py test_coverage_report.py test_inventory_integration.py ./
 COPY repair_plan.py repair_runtime.py repair_supervisor.py test_repair_plan.py test_repair_runtime.py ./
 RUN python -m unittest discover -s . -p 'test_*.py' -v

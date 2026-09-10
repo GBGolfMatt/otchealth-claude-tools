@@ -132,20 +132,20 @@ class BuildWorkerContractTests(unittest.TestCase):
             fakebin = Path(raw) / "bin"; fakebin.mkdir(); runner_temp = Path(raw) / "runner"; runner_temp.mkdir()
             revision = "7" * 40
             (fakebin / "git").write_text("#!/usr/bin/env bash\nset -euo pipefail\ncase \"$*\" in\n  'rev-parse --show-toplevel') echo \"$FAKE_ROOT\" ;;\n  'rev-parse HEAD') echo \"$FAKE_REVISION\" ;;\n  'status --porcelain -- '* ) : ;;\n  *) exit 2 ;;\nesac\n")
-            (fakebin / "depot").write_text("#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > \"$FAKE_DEPOT_ARGS\"\nwhile [[ $# -gt 0 ]]; do [[ \"$1\" == --metadata-file ]] && { printf '{\"containerimage.digest\":\"sha256:%s\"}' \"$FAKE_DIGEST\" > \"$2\"; exit 0; }; shift; done\nexit 1\n")
-            (fakebin / "docker").write_text("#!/usr/bin/env bash\nset -euo pipefail\ncat \"$FAKE_MANIFEST\"\n")
+            (fakebin / "docker").write_text("#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_ARGS\"\nif [[ \"$1 $2\" == 'buildx build' ]]; then\n  while [[ $# -gt 0 ]]; do [[ \"$1\" == --metadata-file ]] && { printf '{\"containerimage.digest\":\"sha256:%s\"}' \"$FAKE_DIGEST\" > \"$2\"; exit 0; }; shift; done\n  exit 1\nfi\nif [[ \"$1 $2 $3\" == 'buildx imagetools inspect' ]]; then cat \"$FAKE_MANIFEST\"; exit 0; fi\nexit 1\n")
             for path in fakebin.iterdir(): path.chmod(0o755)
             manifest = {"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}, "digest": "sha256:" + "3" * 64}, {"platform": {"os": "linux", "architecture": "arm64"}, "digest": "sha256:" + "4" * 64}]}
             manifest_path = Path(raw) / "manifest.json"; manifest_raw = json.dumps(manifest, separators=(",", ":")).encode(); manifest_path.write_bytes(manifest_raw)
             env = {"PATH": str(fakebin) + os.pathsep + os.environ["PATH"], "RUNNER_TEMP": str(runner_temp), "FAKE_ROOT": str(root), "FAKE_REVISION": revision,
-                   "FAKE_DEPOT_ARGS": str(Path(raw) / "depot-args.txt"), "FAKE_DIGEST": hashlib.sha256(manifest_raw).hexdigest(), "FAKE_MANIFEST": str(manifest_path)}
+                   "FAKE_DOCKER_ARGS": str(Path(raw) / "docker-args.txt"), "FAKE_DIGEST": hashlib.sha256(manifest_raw).hexdigest(), "FAKE_MANIFEST": str(manifest_path)}
             result = subprocess.run(["bash", str(component / "build-worker.sh")], text=True, capture_output=True, env=env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             receipt_dir = runner_temp / f"cfo-catalog-{revision}"
+            self.assertTrue((receipt_dir / "build-metadata.json").is_file())
             self.assertTrue((receipt_dir / "receipt.json").is_file())
             self.assertTrue((receipt_dir / "receipt.sha256").is_file())
             self.assertEqual((receipt_dir / "receipt.json").read_bytes() and json.loads((receipt_dir / "receipt.json").read_text())["source_commit"], revision)
-            args = (Path(raw) / "depot-args.txt").read_text()
+            args = (Path(raw) / "docker-args.txt").read_text()
             self.assertIn(f"cfo-catalog-{revision}", args)
             self.assertNotIn("latest", args)
 
